@@ -131,7 +131,7 @@ def _iface_vars(cfg: RulesetConfig) -> Dict[str, str]:
 
 def _pset(ports) -> str:
     """Format a collection of ports as an nftables set literal, e.g. ``{ 22, 80 }``."""
-    return "{ " + ", ".join(str(p) for p in sorted(ports)) + " }"
+    return "{ " + ", ".join(str(p) for p in sorted(set(ports))) + " }"
 
 
 def _normalize_intervals(elements: List[str]) -> List[str]:
@@ -398,7 +398,7 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a(f"        {VPN} ip saddr @dk_ips tcp dport {ssh} accept   # DK GeoIP")
     a(f"        {VPN} tcp dport {ssh} drop")
 
-    vpn_tcp_no_ssh = vpn_tcp_in - {ssh}
+    vpn_tcp_no_ssh = (vpn_tcp_in - {ssh}) - set(cfg.cosmos_public_ports)
     if vpn_tcp_no_ssh:
         a(f"        {VPN} tcp dport {_pset(vpn_tcp_no_ssh)} accept")
     if vpn_udp_in:

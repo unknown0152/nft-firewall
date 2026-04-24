@@ -1,8 +1,12 @@
+import configparser
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 
+import main
+import core.state as state
+import integrations.docker as docker
 from core.profiles import get_profile
 from core.rules import RulesetConfig, generate_ruleset
 
@@ -52,6 +56,100 @@ def test_public_ports_only_allowed_on_wg0():
 
     assert 'iifname "wg0" tcp dport { 80, 443 } accept' in ruleset
     assert 'iifname "eth0" tcp dport { 80, 443 } accept' not in ruleset
+
+
+def test_build_ruleset_config_reads_cosmos_public_ports_from_ini(monkeypatch):
+    cfg = configparser.ConfigParser()
+    cfg.read_string("""
+[network]
+phy_if = eth0
+vpn_interface = wg0
+vpn_server_ip = 198.51.100.10
+vpn_server_port = 51820
+lan_net = 192.168.1.0/24
+
+[cosmos]
+enabled = true
+public_ports = 80,443
+""")
+    monkeypatch.setattr(state, "merge_live_sets_into_persistent", lambda: {})
+    monkeypatch.setattr(docker, "detect_bridge_networks", lambda _supernet: ["172.18.0.0/16"])
+
+    ruleset_cfg = main._build_ruleset_config(cfg, "cosmos-vpn-secure")
+    ruleset = generate_ruleset(ruleset_cfg)
+
+    assert ruleset_cfg.cosmos_public_ports == [80, 443]
+    assert 'iifname "wg0" tcp dport { 80, 443 } accept' in ruleset
+    assert 'iifname "eth0" tcp dport { 80, 443 } accept' not in ruleset
+    assert "4242" not in ruleset
+
+
+def test_cosmos_public_ports_do_not_require_running_docker_containers(monkeypatch):
+    cfg = configparser.ConfigParser()
+    cfg.read_string("""
+[network]
+phy_if = enp88s0
+vpn_interface = wg0
+vpn_server_ip = 198.51.100.10
+vpn_server_port = 51820
+lan_net = 192.168.1.0/24
+
+[cosmos]
+enabled = true
+public_ports = 80,443
+""")
+    monkeypatch.setattr(state, "merge_live_sets_into_persistent", lambda: {})
+    monkeypatch.setattr(docker, "detect_bridge_networks", lambda _supernet: [])
+
+    ruleset_cfg = main._build_ruleset_config(cfg, "cosmos-vpn-secure")
+    ruleset = generate_ruleset(ruleset_cfg, exposed_ports=[])
+
+    assert ruleset_cfg.docker_networks == []
+    assert ruleset_cfg.cosmos_public_ports == [80, 443]
+    assert 'iifname "wg0" tcp dport { 80, 443 } accept' in ruleset
+    assert 'iifname "enp88s0" tcp dport { 80, 443 } accept' not in ruleset
+    assert "udp dport 4242" not in ruleset
+
+
+def test_cosmos_public_input_accept_is_not_duplicated_by_extra_ports():
+    cfg = RulesetConfig(
+        phy_if="enp88s0",
+        vpn_interface="wg0",
+        vpn_server_ip="198.51.100.10",
+        vpn_server_port="51820",
+        extra_ports=[80, 443, 8443],
+        cosmos_public_ports=[80, 443, 443],
+    )
+    ruleset = generate_ruleset(cfg)
+
+    assert ruleset.count('iifname "wg0" tcp dport { 80, 443 } accept') == 1
+    assert 'iifname "wg0" tcp dport { 8443 } accept' in ruleset
+    assert 'iifname "enp88s0" tcp dport { 80, 443 } accept' not in ruleset
+    assert "udp dport 4242" not in ruleset
+
+
+def test_installed_load_config_prefers_etc_nft_firewall(monkeypatch, tmp_path):
+    local_conf = tmp_path / "opt-firewall.ini"
+    etc_conf = tmp_path / "etc-nft-firewall.ini"
+    legacy_conf = tmp_path / "nft-watchdog.conf"
+
+    local_conf.write_text("[network]\nphy_if = eth0\n", encoding="utf-8")
+    etc_conf.write_text(
+        "[network]\nphy_if = enp88s0\n\n[cosmos]\nenabled = true\npublic_ports = 80,443\n",
+        encoding="utf-8",
+    )
+    legacy_conf.write_text("[network]\nphy_if = legacy0\n", encoding="utf-8")
+
+    monkeypatch.setattr(main, "_PROJECT_ROOT", Path("/opt/nft-firewall"))
+    monkeypatch.setattr(main, "_LOCAL_CONF", local_conf)
+    monkeypatch.setattr(main, "_ETC_CONF", etc_conf)
+    monkeypatch.setattr(main, "_SYSTEM_CONF", legacy_conf)
+
+    cfg = main._load_config()
+
+    assert cfg.get("network", "phy_if") == "enp88s0"
+    assert cfg.getboolean("cosmos", "enabled") is True
+    assert cfg.get("cosmos", "public_ports") == "80,443"
 
 
 def test_overlapping_docker_networks_are_collapsed_for_interval_set():

@@ -36,20 +36,38 @@ from typing import List, Optional
 
 _PROJECT_ROOT  = Path(__file__).resolve().parent.parent
 _LOCAL_CONF    = _PROJECT_ROOT / "config" / "firewall.ini"
+_ETC_CONF      = Path("/etc/nft-firewall/firewall.ini")
 _SYSTEM_CONF   = Path("/etc/nft-watchdog.conf")
 _MARKERS_FILE  = Path("/var/lib/nft-firewall/watchdog-markers.json")
 
 
 # ── Config helpers ────────────────────────────────────────────────────────────
 
+def _config_candidates() -> List[Path]:
+    """Return config paths in precedence order for this execution context."""
+    if _PROJECT_ROOT == Path("/opt/nft-firewall"):
+        return [_ETC_CONF, _LOCAL_CONF, _SYSTEM_CONF]
+    return [_LOCAL_CONF, _ETC_CONF, _SYSTEM_CONF]
+
+
+def _active_config_path() -> Optional[Path]:
+    """Return the first readable config path candidate, if any."""
+    for path in _config_candidates():
+        if path.exists():
+            return path
+    return None
+
+
+def _config_path_for_daemon() -> str:
+    """Return the active config path as a string for daemon/report helpers."""
+    return str(_active_config_path() or _SYSTEM_CONF)
+
+
 def _load_config() -> configparser.ConfigParser:
-    """Load INI config, preferring the local project file over the system one."""
+    """Load INI config from the active nft-firewall config path."""
     cfg = configparser.ConfigParser()
-    if _LOCAL_CONF.exists():
-        path = _LOCAL_CONF
-    elif _SYSTEM_CONF.exists():
-        path = _SYSTEM_CONF
-    else:
+    path = _active_config_path()
+    if path is None:
         return cfg
     try:
         cfg.read(str(path))
@@ -398,7 +416,7 @@ def _cmd_geolist(_args: argparse.Namespace) -> None:
 def _cmd_knockd(args: argparse.Namespace) -> None:
     """knockd daemon — run the port-knock listener."""
     from daemons.knockd import PortKnockDaemon
-    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    cfg_path = _config_path_for_daemon()
     if args.knockd_cmd == "daemon":
         PortKnockDaemon(config_path=cfg_path).run_daemon()
     else:
@@ -584,7 +602,7 @@ def _nft_check_permission_error(message: str) -> bool:
 
 def _cmd_health(_args: argparse.Namespace) -> None:
     from daemons.watchdog import NftWatchdog
-    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    cfg_path = _config_path_for_daemon()
     report   = NftWatchdog(config_path=cfg_path).health()
     print(json.dumps(report, indent=2))
     sys.exit(0 if report["status"] == "HEALTHY" else 1)
@@ -593,7 +611,7 @@ def _cmd_health(_args: argparse.Namespace) -> None:
 def _cmd_status(_args: argparse.Namespace) -> None:
     """status — mobile-friendly vertical dashboard."""
     from utils.formatter import build_status_report
-    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    cfg_path = _config_path_for_daemon()
     print(build_status_report(cfg_path))
 
 
@@ -602,7 +620,7 @@ def _cmd_firewall_report(args: argparse.Namespace) -> None:
     from utils.formatter import build_status_report
     from utils.keybase import notify
 
-    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    cfg_path = _config_path_for_daemon()
     report   = build_status_report(cfg_path, weekly=getattr(args, "weekly", False))
     print(report)
 
@@ -673,7 +691,7 @@ def _cmd_keybase_test(_args: argparse.Namespace) -> None:
 
 def _cmd_listener(args: argparse.Namespace) -> None:
     from daemons.listener import KeybaseListener
-    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    cfg_path = _config_path_for_daemon()
     if args.listener_cmd == "daemon":
         KeybaseListener(config_path=cfg_path).run_daemon()
     else:
@@ -682,7 +700,7 @@ def _cmd_listener(args: argparse.Namespace) -> None:
 
 def _cmd_ssh_alert(args: argparse.Namespace) -> None:
     from daemons.ssh_alert import SshAlertDaemon
-    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    cfg_path = _config_path_for_daemon()
     if args.ssh_alert_cmd == "daemon":
         SshAlertDaemon(config_path=cfg_path).run_daemon()
     else:
@@ -691,7 +709,7 @@ def _cmd_ssh_alert(args: argparse.Namespace) -> None:
 
 def _cmd_watchdog(args: argparse.Namespace) -> None:
     from daemons.watchdog import NftWatchdog
-    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    cfg_path = _config_path_for_daemon()
     wd = NftWatchdog(config_path=cfg_path)
 
     if args.watchdog_cmd == "daemon":
