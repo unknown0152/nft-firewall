@@ -1,0 +1,67 @@
+# =============================================================================
+# NFT Firewall — .gitignore
+# Keeps secrets, runtime state, and build artefacts out of version control.
+# =============================================================================
+
+# ── Secrets & local config ────────────────────────────────────────────────────
+# The real config with VPN IPs, SSH port, and Keybase credentials.
+# Only the sanitised *.example template is committed.
+config/firewall.ini
+*.ini
+!*.ini.example
+
+# ── Runtime state ─────────────────────────────────────────────────────────────
+# Live nftables snapshots, tailer offsets, and persistent attacker records.
+# These are machine-specific and regenerated on every apply/restart.
+state/
+
+# Project-local log files (daemons log to journald; any local files stay out).
+logs/
+*.log
+*.log.[0-9]*
+*.log.gz
+*.log.[0-9]*.gz
+
+# ── Build & distribution artefacts ───────────────────────────────────────────
+dist/
+build/
+*.tar.gz
+*.egg-info/
+*.egg
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ── Backups & archives ────────────────────────────────────────────────────────
+# Created by backup_firewall.sh — should live on a backup target, not in git.
+.backups/
+backups/
+
+# ── Editor & OS clutter ───────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Test artefacts ────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Scratch / review files ────────────────────────────────────────────────────
+full_project_review.txt
+*.bak
+*.orig

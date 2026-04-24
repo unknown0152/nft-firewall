@@ -1,0 +1,827 @@
+#!/usr/bin/env python3
+"""
+setup.py — NFT Firewall System Installer.
+
+Performs a privilege-separated installation of the nft-firewall suite under
+a dedicated 'fw-admin' system account, completely isolated from personal
+login accounts.
+
+Usage
+-----
+    sudo python3 setup.py install    # full install or idempotent upgrade
+    sudo python3 setup.py status     # show current installation state
+    sudo python3 setup.py uninstall  # stop services and remove /opt/nft-firewall
+
+The installer is idempotent: running 'install' twice is safe.
+
+Security model
+--------------
+All daemons run as the 'fw-admin' system user (no login shell, no home
+directory).  Privileged operations (nft, wg-quick, ip, conntrack, systemctl
+for the VPN unit) are delegated through a minimal /etc/sudoers.d/nft-firewall
+entry that grants exactly those commands — nothing more.  The personal user
+account that owns Keybase is granted a single sudo permit so that fw-admin
+can send chat notifications without holding the Keybase session itself.
+"""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import grp
+import ipaddress
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+# ── Layout ────────────────────────────────────────────────────────────────────
+
+SYSTEM_USER  = "fw-admin"
+INSTALL_DIR  = Path("/opt/nft-firewall")
+LOG_DIR      = Path("/var/log/nft-firewall")
+LIB_DIR      = Path("/var/lib/nft-firewall")
+ETC_DIR      = Path("/etc/nft-firewall")
+SUDOERS_FILE = Path("/etc/sudoers.d/nft-firewall")
+SYSTEMD_DST  = Path("/etc/systemd/system")
+SYSTEMD_SRC  = Path(__file__).resolve().parent / "systemd"
+PYTHON_BIN   = "/usr/bin/python3"
+
+# Long-running daemons (restarted on every install)
+ACTIVE_SERVICES = ["nft-watchdog", "nft-listener", "nft-ssh-alert"]
+# Timer-driven units (enabled; systemd fires them on schedule)
+TIMERS          = ["nft-daily-report"]
+
+
+# ── Output helpers ────────────────────────────────────────────────────────────
+
+def _ok(msg: str)   -> None: print(f"  \033[32m✓\033[0m  {msg}")
+def _info(msg: str) -> None: print(f"  \033[34m→\033[0m  {msg}")
+def _warn(msg: str) -> None: print(f"  \033[33m!\033[0m  {msg}", file=sys.stderr)
+
+def _header(title: str) -> None:
+    bar = "─" * max(4, 58 - len(title))
+    print(f"\n\033[1m── {title} {bar}\033[0m")
+
+def _die(msg: str) -> None:
+    print(f"\n\033[31m[FATAL]\033[0m {msg}", file=sys.stderr)
+    sys.exit(1)
+
+def _run(cmd: List[str], check: bool = True, **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, check=check, **kw)
+
+def _require_root() -> None:
+    if os.geteuid() != 0:
+        _die("Must run as root:  sudo python3 setup.py install")
+
+
+# ── Step 0: Interactive configuration wizard ──────────────────────────────────
+
+_CONF_DIR  = Path(__file__).resolve().parent / "config"
+_CONF_FILE = _CONF_DIR / "firewall.ini"
+
+
+def _ask(label: str, default: str = "", hint: str = "") -> str:
+    """Prompt for a value; pressing Enter accepts the default.
+
+    If a default was detected it is shown in brackets.  The hint (e.g. an
+    example value) is only shown when there is no detected default.
+    """
+    shown = default if default else hint
+    suffix = f" \033[90m[{shown}]\033[0m" if shown else ""
+    try:
+        val = input(f"  {label}{suffix}: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        sys.exit(0)
+    return val or default
+
+
+def _ask_ports(label: str, default: str = "") -> str:
+    """Prompt for a comma-separated list of ports; validate each entry."""
+    while True:
+        raw = _ask(label, default=default, hint=default or "leave blank to skip")
+        if not raw:
+            return ""
+        parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+        bad = [p for p in parts if not (p.isdigit() and 1 <= int(p) <= 65535)]
+        if bad:
+            print(f"  \033[31m  Invalid port(s): {', '.join(bad)} — enter numbers 1-65535\033[0m")
+            continue
+        return ", ".join(parts)
+
+
+def _detect_phy_if() -> str:
+    """Heuristic: first non-loopback, non-virtual interface from `ip link`."""
+    _skip = ("lo", "wg", "docker", "veth", "br-", "virbr", "tun", "tap", "dummy")
+    r = subprocess.run(["ip", "-o", "link", "show"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2:
+            name = parts[1].strip().split("@")[0]  # strip @ifname for veth
+            if not any(name.startswith(p) for p in _skip):
+                return name
+    return ""
+
+
+def _detect_vpn_if() -> str:
+    """Return first wg* interface found in `ip link`, or first /etc/wireguard/*.conf stem."""
+    r = subprocess.run(["ip", "-o", "link", "show"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2:
+            name = parts[1].strip()
+            if name.startswith("wg"):
+                return name
+    wg_dir = Path("/etc/wireguard")
+    if wg_dir.exists():
+        confs = sorted(wg_dir.glob("*.conf"))
+        if confs:
+            return confs[0].stem
+    return "wg0"
+
+
+def _detect_vpn_endpoint(vpn_if: str) -> Tuple[str, str]:
+    """Parse ``Endpoint = host:port`` from /etc/wireguard/<iface>.conf."""
+    conf = Path(f"/etc/wireguard/{vpn_if}.conf")
+    if conf.exists():
+        try:
+            text = conf.read_text()
+            m = re.search(r"^\s*Endpoint\s*=\s*([^:\s]+):(\d+)", text, re.MULTILINE)
+            if m:
+                return m.group(1), m.group(2)
+        except PermissionError:
+            pass
+    return "", ""
+
+
+def _detect_lan_net(phy_if: str) -> str:
+    """Derive the LAN subnet from the physical interface's first IPv4 address."""
+    if not phy_if:
+        return ""
+    r = subprocess.run(["ip", "-4", "addr", "show", phy_if], capture_output=True, text=True)
+    m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", r.stdout)
+    if m:
+        try:
+            return str(ipaddress.ip_interface(m.group(1)).network)
+        except ValueError:
+            pass
+    return ""
+
+
+def _detect_ssh_port() -> str:
+    """Read the Port directive from /etc/ssh/sshd_config."""
+    try:
+        text = Path("/etc/ssh/sshd_config").read_text()
+        m = re.search(r"^\s*Port\s+(\d+)", text, re.MULTILINE)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return "22"
+
+
+def _detect_keybase_linux_user() -> str:
+    """Find a Linux user that has a Keybase config directory."""
+    try:
+        for home in sorted(Path("/home").iterdir()):
+            if (home / ".config" / "keybase").is_dir():
+                return home.name
+    except Exception:
+        pass
+    return ""
+
+
+def _write_firewall_ini(values: dict) -> None:
+    """Write config/firewall.ini from a dict of section → {key: value}."""
+    _CONF_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = configparser.ConfigParser()
+    for section, kvs in values.items():
+        cfg[section] = kvs
+    with open(_CONF_FILE, "w") as fh:
+        cfg.write(fh)
+
+
+def step0_configure(reconfigure: bool = False) -> None:
+    """Interactive wizard: detect defaults and ask the user to confirm/override.
+
+    Writes ``config/firewall.ini``.  Skipped automatically on re-installs
+    unless *reconfigure* is ``True``.
+    """
+    _header("Step 0 — Configure firewall.ini")
+
+    if _CONF_FILE.exists() and not reconfigure:
+        _ok(f"firewall.ini already exists — skipping  (use --reconfigure to redo)")
+        return
+
+    print("  Detected values are shown in \033[90m[brackets]\033[0m. "
+          "Press Enter to accept, or type to override.\n")
+
+    # ── Network ───────────────────────────────────────────────────────────────
+    print("  \033[1mNetwork\033[0m")
+
+    phy_if = _ask("Physical (WAN) interface",
+                  default=_detect_phy_if(),
+                  hint="run `ip link show` to list interfaces")
+
+    vpn_if = _ask("WireGuard interface", default=_detect_vpn_if())
+
+    lan_net = _ask("LAN subnet (CIDR)",
+                   default=_detect_lan_net(phy_if),
+                   hint="e.g. 192.168.1.0/24")
+
+    detected_ip, detected_port = _detect_vpn_endpoint(vpn_if)
+    vpn_ip   = _ask("VPN server IP / hostname", default=detected_ip)
+    vpn_port = _ask("VPN server UDP port",      default=detected_port or "51820")
+
+    ssh_port = _ask("SSH daemon port", default=_detect_ssh_port())
+
+    # ── Open ports ────────────────────────────────────────────────────────────
+    print()
+    print("  \033[1mOpen ports on the VPN interface\033[0m")
+    print("  (These are the ports reachable when connected to the VPN.)")
+
+    # Read existing extra_ports / torrent_port as defaults when reconfiguring
+    _existing_extra   = ""
+    _existing_torrent = ""
+    if _CONF_FILE.exists():
+        try:
+            _ec = configparser.ConfigParser()
+            _ec.read(str(_CONF_FILE))
+            _existing_extra   = _ec.get("network", "extra_ports",  fallback="")
+            _existing_torrent = _ec.get("network", "torrent_port", fallback="")
+        except Exception:
+            pass
+
+    extra_ports   = _ask_ports("Extra TCP ports (e.g. 8080, 443)",
+                               default=_existing_extra)
+    torrent_port  = _ask_ports("BitTorrent port (TCP + UDP)",
+                               default=_existing_torrent)
+    # Validate torrent_port is a single port
+    if torrent_port and "," in torrent_port:
+        _warn("BitTorrent port must be a single port — using first value")
+        torrent_port = torrent_port.split(",")[0].strip()
+
+    # ── Keybase ───────────────────────────────────────────────────────────────
+    print()
+    print("  \033[1mKeybase ChatOps\033[0m")
+    print("  (Leave blank to disable — you can add it to firewall.ini later.)")
+
+    kb_linux_user  = _ask("Linux user running Keybase",
+                          default=_detect_keybase_linux_user())
+    kb_team        = _ask("Keybase team name",    default="")
+    kb_channel     = _ask("Team channel",         default="general")
+    kb_target_user = _ask("Your Keybase username  (REQUIRED — authorizes !commands)", default="")
+
+    # ── Firewall profile ──────────────────────────────────────────────────────
+    print()
+    print("  \033[1mFirewall profile\033[0m")
+    _existing_profile = ""
+    if _CONF_FILE.exists():
+        try:
+            _pc = configparser.ConfigParser()
+            _pc.read(str(_CONF_FILE))
+            _existing_profile = _pc.get("install", "profile", fallback="")
+        except Exception:
+            pass
+    firewall_profile = _ask("Firewall profile",
+                            default=_existing_profile or "cosmos-vpn-secure",
+                            hint="cosmos-vpn-secure")
+
+    # ── Write ─────────────────────────────────────────────────────────────────
+    print()
+
+    network_section: dict = {
+        "phy_if":          phy_if,
+        "vpn_interface":   vpn_if,
+        "lan_net":         lan_net,
+        "vpn_server_ip":   vpn_ip,
+        "vpn_server_port": vpn_port,
+        "ssh_port":        ssh_port,
+    }
+    if extra_ports:
+        network_section["extra_ports"] = extra_ports
+    if torrent_port:
+        network_section["torrent_port"] = torrent_port
+
+    keybase_section: dict = {}
+    if kb_linux_user:
+        keybase_section["linux_user"] = kb_linux_user
+    if kb_team:
+        keybase_section["team"] = kb_team
+    if kb_channel:
+        keybase_section["channel"] = kb_channel
+    if kb_target_user:
+        keybase_section["target_user"] = kb_target_user
+
+    sections: dict = {"network": network_section}
+    if keybase_section:
+        sections["keybase"] = keybase_section
+    sections["install"] = {"profile": firewall_profile}
+
+    _write_firewall_ini(sections)
+    _ok(f"Written {_CONF_FILE}")
+
+    # Summary
+    print()
+    print(f"    Interface  : {phy_if}  (VPN: {vpn_if})")
+    print(f"    LAN        : {lan_net}")
+    print(f"    VPN server : {vpn_ip}:{vpn_port}")
+    print(f"    SSH port   : {ssh_port}")
+    if extra_ports:
+        print(f"    Extra ports: {extra_ports}")
+    if torrent_port:
+        print(f"    Torrent    : {torrent_port}")
+    if kb_team:
+        print(f"    Keybase    : {kb_team}#{kb_channel}  (linux: {kb_linux_user})")
+
+
+# ── Step 1: System user ───────────────────────────────────────────────────────
+
+def step1_create_system_user() -> None:
+    """Create fw-admin as a no-login system account, add to 'adm' group."""
+    _header("Step 1 — System User")
+
+    try:
+        pw = pwd.getpwnam(SYSTEM_USER)
+        _ok(f"User '{SYSTEM_USER}' already exists (uid={pw.pw_uid}, shell={pw.pw_shell})")
+    except KeyError:
+        _info(f"Creating system user '{SYSTEM_USER}' ...")
+        r = _run(
+            ["useradd", "--system", "--no-create-home",
+             "--shell", "/bin/false", SYSTEM_USER],
+            check=False,
+        )
+        if r.returncode != 0:
+            _die(f"useradd failed: {r.stderr.strip()}")
+        _ok(f"Created system user '{SYSTEM_USER}' (uid={pwd.getpwnam(SYSTEM_USER).pw_uid})")
+
+    # 'adm' group membership lets fw-admin read /var/log/auth.log (ssh-alert)
+    try:
+        grp.getgrnam("adm")
+        r = _run(["usermod", "--append", "--groups", "adm", SYSTEM_USER], check=False)
+        if r.returncode == 0:
+            _ok(f"'{SYSTEM_USER}' is in group 'adm' (auth.log read access)")
+    except KeyError:
+        _warn("Group 'adm' not found — ssh-alert may not be able to read auth.log")
+
+
+# ── Step 2: Install code ──────────────────────────────────────────────────────
+
+def step2_install_code() -> None:
+    """Sync src/ and config/ from the repo to /opt/nft-firewall/."""
+    _header("Step 2 — Install Code to /opt/nft-firewall")
+
+    project_root = Path(__file__).resolve().parent
+
+    src_dir = project_root / "src"
+    if not src_dir.is_dir():
+        _die(f"src/ not found at {src_dir} — run setup.py from the repository root")
+
+    # src/ → /opt/nft-firewall/src/
+    dst_src = INSTALL_DIR / "src"
+    _info(f"Syncing {src_dir} → {dst_src}")
+    if dst_src.exists():
+        shutil.rmtree(dst_src)
+    shutil.copytree(src_dir, dst_src)
+    _ok(f"Installed src/ ({sum(1 for _ in dst_src.rglob('*.py'))} Python files)")
+
+    # config/ → /opt/nft-firewall/config/   (main.py resolves config relative to itself)
+    cfg_dir = project_root / "config"
+    if cfg_dir.is_dir():
+        dst_cfg = INSTALL_DIR / "config"
+        if dst_cfg.exists():
+            shutil.rmtree(dst_cfg)
+        shutil.copytree(cfg_dir, dst_cfg)
+        _ok(f"Installed config/ → {dst_cfg}")
+    else:
+        _warn("config/ directory not found — skipping (firewall.ini must be added manually)")
+
+    # Make main.py executable
+    main_py = INSTALL_DIR / "src" / "main.py"
+    if main_py.exists():
+        main_py.chmod(0o755)
+
+
+# ── Step 3: Directories & ownership ──────────────────────────────────────────
+
+def step3_scaffold_dirs() -> None:
+    """Create runtime directories and chown everything to fw-admin:fw-admin."""
+    _header("Step 3 — Scaffold Directories & Ownership")
+
+    for d in (INSTALL_DIR, LOG_DIR, LIB_DIR, ETC_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+        _ok(f"Ensured {d}")
+
+    for d in (INSTALL_DIR, LOG_DIR, LIB_DIR, ETC_DIR):
+        _run(["chown", "-R", f"{SYSTEM_USER}:{SYSTEM_USER}", str(d)])
+        _ok(f"chown -R {SYSTEM_USER}:{SYSTEM_USER}  {d}")
+
+
+# ── Step 4: Sudoers ───────────────────────────────────────────────────────────
+
+def step4_install_sudoers() -> None:
+    """Write a minimal /etc/sudoers.d/nft-firewall granting least-privilege access."""
+    _header("Step 4 — Sudoers (Least-Privilege Grants)")
+
+    keybase_user = _read_keybase_user()
+
+    # Build the sudoers fragment
+    fragment_lines = [
+        "# nft-firewall — least-privilege grants for the fw-admin service account.",
+        "# Generated by setup.py — re-run 'sudo python3 /opt/nft-firewall/setup.py install'",
+        "# to regenerate after changes.",
+        "",
+        f"Defaults:{SYSTEM_USER} !requiretty",
+        "",
+        "# Firewall & VPN operations required by nft-watchdog and nft-ssh-alert",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: \\",
+        "    /usr/sbin/nft, \\",
+        "    /usr/bin/wg, \\",
+        "    /usr/bin/wg-quick, \\",
+        "    /sbin/ip, \\",
+        "    /usr/sbin/ip, \\",
+        "    /usr/bin/ip, \\",
+        "    /usr/sbin/conntrack, \\",
+        "    /usr/bin/conntrack, \\",
+        "    /usr/bin/systemctl start wg-quick@*, \\",
+        "    /usr/bin/systemctl stop wg-quick@*, \\",
+        "    /usr/bin/systemctl restart wg-quick@*, \\",
+        "    /usr/bin/systemctl reload wg-quick@*, \\",
+        "    /usr/bin/fail2ban-client, \\",
+        f"    {PYTHON_BIN} {INSTALL_DIR}/src/main.py *",
+        "",
+    ]
+
+    if keybase_user:
+        fragment_lines += [
+            "# Keybase notifications — fw-admin uses the wrapper script as the Keybase account",
+            f"{SYSTEM_USER} ALL=({keybase_user}) NOPASSWD: /usr/local/bin/nft-keybase-notify",
+            "",
+        ]
+    else:
+        fragment_lines += [
+            "# Keybase linux_user not detected in firewall.ini — add manually if needed:",
+            f"# {SYSTEM_USER} ALL=(<your-linux-user>) NOPASSWD: /usr/local/bin/nft-keybase-notify",
+            "",
+        ]
+
+    content = "\n".join(fragment_lines)
+
+    # Validate with visudo before touching the real file
+    _info("Validating sudoers fragment with visudo ...")
+    tmp = Path(tempfile.mktemp(suffix=".sudoers", dir="/tmp"))
+    try:
+        tmp.write_text(content)
+        r = _run(["visudo", "--check", "--file", str(tmp)], check=False)
+        if r.returncode != 0:
+            _die(f"visudo rejected the sudoers fragment:\n{r.stderr.strip()}")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    SUDOERS_FILE.write_text(content)
+    SUDOERS_FILE.chmod(0o440)   # sudo requires 440 or 640
+    _ok(f"Installed {SUDOERS_FILE}")
+    if keybase_user:
+        _ok(f"Keybase grant: {SYSTEM_USER} may run keybase as '{keybase_user}'")
+    else:
+        _warn("Keybase user not configured — add to firewall.ini [keybase] linux_user")
+
+    # Install the Keybase wrapper script used by the sudoers rule above.
+    # Running `sudo -u nuc env HOME=... keybase` would make sudo execute /usr/bin/env
+    # which doesn't match a clean NOPASSWD rule.  The wrapper sets the environment
+    # variables and exec's keybase so the sudoers command is an exact, fixed path.
+    _install_keybase_wrapper(keybase_user)
+
+
+def _read_keybase_user() -> str:
+    """Return [keybase] linux_user from firewall.ini, checking install dir first."""
+    for ini_path in (
+        INSTALL_DIR / "config" / "firewall.ini",
+        Path(__file__).resolve().parent / "config" / "firewall.ini",
+    ):
+        try:
+            cfg = configparser.ConfigParser()
+            cfg.read(str(ini_path))
+            u = cfg.get("keybase", "linux_user", fallback="").strip()
+            if u:
+                return u
+        except Exception:
+            pass
+    return ""
+
+
+def _install_keybase_wrapper(kb_user: str) -> None:
+    """Write /usr/local/bin/nft-keybase-notify — the sudoers-safe Keybase wrapper.
+
+    The wrapper sets HOME and XDG_RUNTIME_DIR for the Keybase user and exec's
+    keybase, so the sudoers NOPASSWD rule can match an exact, fixed path instead
+    of /usr/bin/env.
+    """
+    wrapper = Path("/usr/local/bin/nft-keybase-notify")
+
+    if kb_user:
+        try:
+            pw      = pwd.getpwnam(kb_user)
+            kb_home = pw.pw_dir
+            kb_uid  = pw.pw_uid
+        except KeyError:
+            _warn(f"Cannot look up user '{kb_user}' — Keybase wrapper not installed")
+            return
+    else:
+        # No Keybase user configured; install a stub that exits clearly
+        kb_home = "/home/UNCONFIGURED"
+        kb_uid  = 1000
+
+    script = (
+        "#!/bin/bash\n"
+        "# Wrapper installed by nft-firewall setup.py\n"
+        "# Allows fw-admin to run keybase as the Keybase account via a clean sudo rule.\n"
+        f"export HOME={kb_home}\n"
+        f"export XDG_RUNTIME_DIR=/run/user/{kb_uid}\n"
+        'exec /usr/bin/keybase "$@"\n'
+    )
+
+    wrapper.write_text(script)
+    wrapper.chmod(0o755)
+    _ok(f"Installed {wrapper}  (HOME={kb_home}, XDG_RUNTIME_DIR=/run/user/{kb_uid})")
+
+
+# ── Step 5: Systemd unit files ────────────────────────────────────────────────
+
+# Each tuple is (regex pattern, replacement) applied line-by-line.
+# Replacements use named backreferences so the directive key is preserved.
+_PATCHES: List[Tuple[str, str]] = [
+    # User=<anything>  →  User=fw-admin
+    (r"^(User=).*$",
+     rf"\g<1>{SYSTEM_USER}"),
+
+    # WorkingDirectory=<anything>  →  WorkingDirectory=/opt/nft-firewall
+    (r"^(WorkingDirectory=).*$",
+     rf"\g<1>{INSTALL_DIR}"),
+
+    # ExecStart / ExecStartPost: replace whatever path precedes /src/main.py
+    (r"^(Exec\w+=\S+\s+)\S+/src/main\.py",
+     rf"\g<1>{INSTALL_DIR}/src/main.py"),
+
+    # Environment=PYTHONPATH=<anything>  →  correct install path
+    (r"^(Environment=PYTHONPATH=).*$",
+     rf"\g<1>{INSTALL_DIR}/src"),
+]
+
+
+def _patch_unit(content: str) -> str:
+    """Apply all layout patches to a systemd unit file, line by line."""
+    out_lines = []
+    for line in content.splitlines(keepends=True):
+        stripped = line.rstrip("\n")
+        for pattern, replacement in _PATCHES:
+            stripped = re.sub(pattern, replacement, stripped)
+        out_lines.append(stripped + ("\n" if line.endswith("\n") else ""))
+    return "".join(out_lines)
+
+
+# Units that must keep User=root — skip the User= substitution for these.
+_ROOT_UNITS = {"nft-daily-report.service"}
+
+
+def step5_deploy_services() -> None:
+    """Patch and deploy all .service and .timer files from systemd/ to /etc/systemd/system/."""
+    _header("Step 5 — Systemd Unit Files")
+
+    if not SYSTEMD_SRC.is_dir():
+        _die(
+            f"systemd/ directory not found at {SYSTEMD_SRC}\n"
+            "Run setup.py from the repository root."
+        )
+
+    unit_files = sorted(SYSTEMD_SRC.glob("*.service")) + sorted(SYSTEMD_SRC.glob("*.timer"))
+    if not unit_files:
+        _die(f"No .service or .timer files found in {SYSTEMD_SRC}")
+
+    for src in unit_files:
+        raw = src.read_text()
+        if src.name in _ROOT_UNITS:
+            # Apply all patches EXCEPT User= so User=root is preserved
+            patched_lines = []
+            for line in raw.splitlines(keepends=True):
+                stripped = line.rstrip("\n")
+                for pattern, replacement in _PATCHES:
+                    if "User=" in pattern:
+                        continue
+                    stripped = re.sub(pattern, replacement, stripped)
+                patched_lines.append(stripped + ("\n" if line.endswith("\n") else ""))
+            patched = "".join(patched_lines)
+        else:
+            patched = _patch_unit(raw)
+        dst = SYSTEMD_DST / src.name
+        dst.write_text(patched)
+        dst.chmod(0o644)
+        _ok(f"Deployed {src.name}  →  {dst}")
+
+
+# ── Step 7: Apply ruleset (writes watchdog-markers.json) ─────────────────────
+
+def step7_apply_ruleset() -> None:
+    """Apply the firewall profile so watchdog-markers.json is written before daemons start."""
+    _header("Step 7 — Apply Ruleset")
+
+    cfg = configparser.ConfigParser()
+    for ini in (INSTALL_DIR / "config" / "firewall.ini", _CONF_FILE):
+        if ini.exists():
+            cfg.read(str(ini))
+            break
+
+    profile = cfg.get("install", "profile", fallback="cosmos-vpn-secure")
+    main_py = INSTALL_DIR / "src" / "main.py"
+
+    _info(f"Applying firewall profile '{profile}' ...")
+    r = _run([PYTHON_BIN, str(main_py), "apply", profile], check=False)
+    if r.returncode == 0:
+        _ok(f"Ruleset applied — watchdog-markers.json written")
+    else:
+        _warn(f"apply returned non-zero (exit {r.returncode}): {r.stderr.strip()}")
+        _warn("Daemons will start but watchdog may alert until apply succeeds manually.")
+
+
+# ── Step 6: Reload & restart ──────────────────────────────────────────────────
+
+def step6_reload_and_restart() -> None:
+    """Reload systemd and restart all nft-firewall units."""
+    _header("Step 6 — Reload & Restart")
+
+    r = _run(["systemctl", "daemon-reload"], check=False)
+    if r.returncode != 0:
+        _die(f"daemon-reload failed: {r.stderr.strip()}")
+    _ok("systemctl daemon-reload")
+
+    for svc in ACTIVE_SERVICES:
+        unit = f"{svc}.service"
+        _run(["systemctl", "enable", unit], check=False)
+        r = _run(["systemctl", "restart", unit], check=False)
+        if r.returncode == 0:
+            _ok(f"{unit} restarted")
+        else:
+            # Show the last 15 journal lines so the user can diagnose inline
+            jctl = subprocess.run(
+                ["journalctl", "-u", unit, "-n", "15", "--no-pager"],
+                capture_output=True, text=True,
+            )
+            _warn(f"{unit} failed to restart:\n{jctl.stdout.strip()}")
+
+    for tmr in TIMERS:
+        unit = f"{tmr}.timer"
+        _run(["systemctl", "enable", unit], check=False)
+        r = _run(["systemctl", "restart", unit], check=False)
+        if r.returncode == 0:
+            _ok(f"{unit} enabled")
+        else:
+            _warn(f"{unit} failed: {r.stderr.strip()}")
+
+
+# ── Sub-commands ──────────────────────────────────────────────────────────────
+
+def cmd_install(reconfigure: bool = False) -> None:
+    step0_configure(reconfigure=reconfigure)
+    step1_create_system_user()
+    step2_install_code()
+    step3_scaffold_dirs()
+    step4_install_sudoers()
+    step5_deploy_services()
+    step7_apply_ruleset()       # apply ruleset + write markers BEFORE starting daemons
+    step6_reload_and_restart()
+
+    print()
+    print("\033[32m\033[1m  Install complete.\033[0m")
+    print(f"    Code        : {INSTALL_DIR}")
+    print(f"    Running as  : {SYSTEM_USER}")
+    print(f"    Logs        : journalctl -u nft-watchdog -f")
+    print(f"    Sudoers     : {SUDOERS_FILE}")
+
+
+def cmd_status() -> None:
+    _header("Installation Status")
+
+    # User
+    try:
+        pw = pwd.getpwnam(SYSTEM_USER)
+        _ok(f"User '{SYSTEM_USER}' — uid={pw.pw_uid}, shell={pw.pw_shell}")
+        groups = [g.gr_name for g in grp.getgrall() if SYSTEM_USER in g.gr_mem]
+        _ok(f"  Groups: {', '.join(groups) or '(none)'}")
+    except KeyError:
+        _warn(f"User '{SYSTEM_USER}' does not exist")
+
+    # Directories
+    for d in (INSTALL_DIR, LOG_DIR, LIB_DIR, ETC_DIR):
+        if d.exists():
+            _ok(f"{d}")
+        else:
+            _warn(f"{d}  MISSING")
+
+    # Sudoers
+    if SUDOERS_FILE.exists():
+        _ok(f"Sudoers: {SUDOERS_FILE}")
+    else:
+        _warn(f"Sudoers {SUDOERS_FILE}  MISSING")
+
+    # Services
+    print()
+    all_units = (
+        [f"{s}.service" for s in ACTIVE_SERVICES]
+        + [f"{t}.timer" for t in TIMERS]
+    )
+    for unit in all_units:
+        r = subprocess.run(
+            ["systemctl", "is-active", unit], capture_output=True, text=True
+        )
+        state = r.stdout.strip()
+        if state == "active":
+            _ok(f"{unit}: {state}")
+        else:
+            _warn(f"{unit}: {state}")
+
+
+def cmd_uninstall() -> None:
+    _header("Uninstall")
+
+    all_units = (
+        [f"{s}.service" for s in ACTIVE_SERVICES]
+        + [f"{t}.timer" for t in TIMERS]
+    )
+
+    _info("Stopping and disabling units ...")
+    for unit in all_units:
+        _run(["systemctl", "stop",    unit], check=False)
+        _run(["systemctl", "disable", unit], check=False)
+
+    # Remove unit files from /etc/systemd/system/
+    for unit in all_units:
+        unit_file = SYSTEMD_DST / unit
+        if unit_file.exists():
+            unit_file.unlink()
+            _ok(f"Removed {unit_file}")
+
+    if INSTALL_DIR.exists():
+        shutil.rmtree(INSTALL_DIR)
+        _ok(f"Removed {INSTALL_DIR}")
+
+    if SUDOERS_FILE.exists():
+        SUDOERS_FILE.unlink()
+        _ok(f"Removed {SUDOERS_FILE}")
+
+    # Remove the Keybase notify wrapper
+    wrapper = Path("/usr/local/bin/nft-keybase-notify")
+    if wrapper.exists():
+        wrapper.unlink()
+        _ok(f"Removed {wrapper}")
+
+    _run(["systemctl", "daemon-reload"], check=False)
+    _ok("systemctl daemon-reload")
+
+    _info("Data directories and fw-admin user were preserved.")
+    _info("To remove them completely, run:")
+    _info(f"  sudo rm -rf {LOG_DIR} {LIB_DIR} {ETC_DIR}")
+    _info(f"  sudo userdel {SYSTEM_USER}")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main() -> None:
+    _require_root()
+    parser = argparse.ArgumentParser(
+        description="NFT Firewall System Installer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  sudo python3 setup.py install               # install or upgrade\n"
+            "  sudo python3 setup.py install --reconfigure # re-run config wizard\n"
+            "  sudo python3 setup.py status                # check installation state\n"
+            "  sudo python3 setup.py uninstall             # remove (preserves data dirs)\n"
+        ),
+    )
+    parser.add_argument(
+        "command",
+        choices=["install", "status", "uninstall"],
+    )
+    parser.add_argument(
+        "--reconfigure",
+        action="store_true",
+        help="re-run the configuration wizard even if firewall.ini already exists",
+    )
+    args = parser.parse_args()
+
+    if args.command == "install":
+        cmd_install(reconfigure=args.reconfigure)
+    elif args.command == "status":
+        cmd_status()
+    elif args.command == "uninstall":
+        cmd_uninstall()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,760 @@
+"""
+src/main.py — NFT Firewall command-line interface.
+
+Wires together all modular components:
+  core.rules          — pure ruleset generation
+  core.state          — apply / backup / restore / set modifiers
+  core.profiles       — named firewall profiles
+  integrations.docker — Docker daemon hardening + expose registry
+  daemons.watchdog    — WireGuard health monitor
+  daemons.listener    — Keybase ChatOps bot
+  daemons.ssh_alert   — SSH intrusion alerter
+  utils.keybase       — shared Keybase notifications
+
+Usage
+-----
+    sudo python3 src/main.py apply cosmos-vpn-secure
+    sudo python3 src/main.py simulate cosmos-vpn-secure
+    sudo python3 src/main.py docker-expose 8080 172.17.0.2 80
+    sudo python3 src/main.py watchdog status
+    python3 src/main.py profiles
+
+Run ``python3 src/main.py --help`` for the full command reference.
+"""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import json
+import os
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+# ── Project root & config paths ───────────────────────────────────────────────
+
+_PROJECT_ROOT  = Path(__file__).resolve().parent.parent
+_LOCAL_CONF    = _PROJECT_ROOT / "config" / "firewall.ini"
+_SYSTEM_CONF   = Path("/etc/nft-watchdog.conf")
+_MARKERS_FILE  = Path("/var/lib/nft-firewall/watchdog-markers.json")
+
+
+# ── Config helpers ────────────────────────────────────────────────────────────
+
+def _load_config() -> configparser.ConfigParser:
+    """Load INI config, preferring the local project file over the system one."""
+    cfg = configparser.ConfigParser()
+    if _LOCAL_CONF.exists():
+        path = _LOCAL_CONF
+    elif _SYSTEM_CONF.exists():
+        path = _SYSTEM_CONF
+    else:
+        return cfg
+    try:
+        cfg.read(str(path))
+    except (configparser.Error, OSError) as exc:
+        _die(f"Cannot read config {path}: {exc}")
+    return cfg
+
+
+def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
+    """Build a :class:`~core.rules.RulesetConfig` from INI config + profile.
+
+    Reads the ``[network]`` section for topology values and overlays the
+    named profile's policy flags.
+
+    Parameters
+    ----------
+    cfg:
+        Loaded :class:`configparser.ConfigParser`.
+    profile_name:
+        Name of a profile from :mod:`core.profiles`.
+
+    Returns
+    -------
+    core.rules.RulesetConfig
+
+    Raises
+    ------
+    KeyError
+        If *profile_name* is unknown.
+    SystemExit
+        If ``phy_if`` is not set in the config (required field).
+    """
+    from core.profiles import get_profile
+    from core.rules import RulesetConfig
+
+    profile = get_profile(profile_name)
+
+    phy_if = cfg.get("network", "phy_if", fallback="").strip()
+    if not phy_if:
+        _die("'phy_if' must be set in [network] section of config — "
+             "e.g. phy_if = eth0")
+
+    extra_raw = cfg.get("network", "extra_ports", fallback="").strip()
+    extra_ports: List[int] = (
+        [_parse_int(p.strip(), "extra_ports") for p in extra_raw.split(",") if p.strip()]
+        if extra_raw else []
+    )
+
+    torrent_raw = cfg.get("network", "torrent_port", fallback="").strip()
+    torrent_port: Optional[int] = _parse_int(torrent_raw, "torrent_port") if torrent_raw else None
+
+    return RulesetConfig(
+        phy_if             = phy_if,
+        vpn_interface      = cfg.get("network", "vpn_interface",      fallback="wg0"),
+        vpn_server_ip      = cfg.get("network", "vpn_server_ip",      fallback=""),
+        vpn_server_port    = cfg.get("network", "vpn_server_port",    fallback=""),
+        lan_net            = cfg.get("network", "lan_net",            fallback="192.168.1.0/24"),
+        container_supernet = cfg.get("network", "container_supernet", fallback="172.16.0.0/12"),
+        ssh_port           = _parse_int(cfg.get("network", "ssh_port", fallback="22"), "ssh_port"),
+        torrent_port       = torrent_port,
+        extra_ports        = extra_ports,
+        cosmos_tcp         = list(profile.cosmos_tcp),
+        cosmos_udp         = list(profile.cosmos_udp),
+        allow_plex_lan     = profile.allow_plex_lan,
+    )
+
+
+def _write_watchdog_markers(ruleset_cfg) -> None:
+    """Atomically write watchdog-markers.json after a successful apply.
+
+    Uses write-to-tmp → fsync → os.replace so a power loss between steps
+    never leaves a half-written or truncated JSON file on disk.
+    """
+    data = {
+        "vpn_iface"  : ruleset_cfg.vpn_interface,
+        "ip6_table"  : "killswitch",
+        "output_rule": f'oifname "{ruleset_cfg.vpn_interface}" accept',
+    }
+    _MARKERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _MARKERS_FILE.with_suffix(".tmp")
+    with tmp.open("w") as fh:
+        fh.write(json.dumps(data, indent=2))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, _MARKERS_FILE)
+    _MARKERS_FILE.chmod(0o644)
+
+
+def _die(msg: str) -> None:
+    print(f"[error] {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _parse_int(value: str, key: str) -> int:
+    """Parse *value* as an integer, raising ValueError with a clear message on failure."""
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"Config key '{key}' has non-integer value: {value!r}")
+
+
+# ── Command handlers ──────────────────────────────────────────────────────────
+
+def _cmd_apply(args: argparse.Namespace) -> None:
+    """apply <profile> [--dry-run] [--safe]"""
+    import select
+    from core.rules import generate_ruleset
+    from core import state
+    from integrations.docker import load_registry
+
+    cfg = _load_config()
+    try:
+        ruleset_cfg = _build_ruleset_config(cfg, args.profile)
+    except (KeyError, ValueError) as exc:
+        _die(str(exc))
+
+    exposed = load_registry()
+    ruleset = generate_ruleset(ruleset_cfg, exposed_ports=exposed)
+
+    if args.dry_run:
+        print(ruleset)
+        return
+
+    # Always simulate before touching the live ruleset
+    ok, err = state.simulate_apply(ruleset)
+    if not ok:
+        _die(f"Ruleset syntax error (nft --check):\n{err}")
+
+    try:
+        backup_path = state.backup_ruleset()
+    except (OSError, RuntimeError) as exc:
+        _die(f"Backup failed — aborting apply: {exc}")
+
+    try:
+        state.apply_ruleset(ruleset)
+        state.save_conf(ruleset)
+    except RuntimeError as exc:
+        print(f"[error] Apply failed: {exc}", file=sys.stderr)
+        print("[error] Attempting rollback ...", file=sys.stderr)
+        if backup_path is not None:
+            try:
+                state.restore_ruleset(backup_path)
+                print("[ok] Rollback succeeded.", file=sys.stderr)
+            except RuntimeError as rb_exc:
+                print(f"[error] Rollback also failed: {rb_exc}", file=sys.stderr)
+        else:
+            print("[error] No backup path available — manual intervention required.",
+                  file=sys.stderr)
+        sys.exit(1)
+
+    if args.safe:
+        print("\n--- ⚠️  SAFE MODE ---")
+        print("  Type CONFIRM within 60s to keep these rules.")
+        print("  No input → previous ruleset is restored.\n")
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 60)
+            confirmed = ready and sys.stdin.readline().strip() == "CONFIRM"
+        except (EOFError, OSError, KeyboardInterrupt):
+            confirmed = False
+
+        if confirmed:
+            print("[ok] CONFIRMED — new rules are now permanent.")
+            _write_watchdog_markers(ruleset_cfg)
+            # Re-apply geo-blocks after a full ruleset reload
+            try:
+                import configparser as _cp
+                _gcfg = _load_config()
+                _geo_countries = [c.strip() for c in
+                                  _gcfg.get("geoblock", "blocked_countries", fallback="").split()
+                                  if c.strip()]
+                if _geo_countries:
+                    from integrations.geoblock import reblock_from_config
+                    reblock_from_config(_geo_countries)
+            except Exception as _ge:
+                print(f"[warn] geoblock reblock_from_config failed (non-fatal): {_ge}",
+                      file=sys.stderr)
+        else:
+            print("[warn] Not confirmed — rolling back ...", file=sys.stderr)
+            if backup_path is not None:
+                try:
+                    state.restore_ruleset(backup_path)
+                    print("[ok] Rollback complete.")
+                except RuntimeError as exc:
+                    _die(f"Rollback failed: {exc}")
+            else:
+                _die("No backup path available — manual intervention required.")
+    else:
+        _write_watchdog_markers(ruleset_cfg)
+        # Re-apply geo-blocks after a full ruleset reload
+        try:
+            import configparser as _cp
+            _gcfg = _load_config()
+            _geo_countries = [c.strip() for c in
+                              _gcfg.get("geoblock", "blocked_countries", fallback="").split()
+                              if c.strip()]
+            if _geo_countries:
+                from integrations.geoblock import reblock_from_config
+                reblock_from_config(_geo_countries)
+        except Exception as _ge:
+            print(f"[warn] geoblock reblock_from_config failed (non-fatal): {_ge}",
+                  file=sys.stderr)
+
+
+def _cmd_simulate(args: argparse.Namespace) -> None:
+    """simulate <profile> — validate syntax with nft --check, never apply."""
+    from core.rules import generate_ruleset
+    from core import state
+    from integrations.docker import load_registry
+
+    cfg = _load_config()
+    try:
+        ruleset_cfg = _build_ruleset_config(cfg, args.profile)
+    except (KeyError, ValueError) as exc:
+        _die(str(exc))
+
+    exposed = load_registry()
+    ruleset = generate_ruleset(ruleset_cfg, exposed_ports=exposed)
+
+    ok, err = state.simulate_apply(ruleset)
+    if ok:
+        print(f"[ok] Ruleset for profile '{args.profile}' is valid (nft --check passed).")
+    else:
+        print(f"[error] Ruleset syntax error:\n{err}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_backup(_args: argparse.Namespace) -> None:
+    from core import state
+    state.backup_ruleset()
+
+
+def _cmd_restore(args: argparse.Namespace) -> None:
+    from core import state
+    backup = Path(args.file) if getattr(args, "file", None) else None
+    try:
+        state.restore_ruleset(backup)
+    except RuntimeError as exc:
+        _die(str(exc))
+
+
+def _cmd_block(args: argparse.Namespace) -> None:
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(args.ip, strict=False)
+    except ValueError:
+        _die(f"Invalid IP/CIDR: {args.ip!r}")
+    # Reject supernets that would silently black-hole all traffic.
+    # blocked_ips carries `flags interval` so nft accepts these without error.
+    if net.num_addresses > 2 ** 24:   # larger than a /8 — almost certainly a mistake
+        _die(
+            f"Refusing to block {args.ip} — prefix covers {net.num_addresses:,} addresses. "
+            f"Use a more specific CIDR (/{net.prefixlen} ≥ /8 required)."
+        )
+    from core.state import block_ip
+    if block_ip(args.ip):
+        print(f"[ok] Blocked {args.ip}")
+    else:
+        _die(f"Failed to block {args.ip} — is the ruleset loaded?")
+
+
+def _cmd_unblock(args: argparse.Namespace) -> None:
+    from core.state import unblock_ip
+    if unblock_ip(args.ip):
+        print(f"[ok] Unblocked {args.ip}")
+    else:
+        _die(f"{args.ip} not found in blocked_ips set.")
+
+
+def _cmd_threat_update(_args: argparse.Namespace) -> None:
+    """threat-update — sync threat feed IPs into blocked_ips set."""
+    from integrations.threatfeed import sync, _load_config as _tf_cfg
+    url, max_entries, enabled = _tf_cfg()
+    if not enabled:
+        print("[threatfeed] disabled in config — skipping")
+        return
+    added, removed = sync(url=url, max_entries=max_entries)
+    print(f"[threatfeed] sync complete: +{added} added, -{removed} removed")
+
+
+def _cmd_metrics_update(_args: argparse.Namespace) -> None:
+    """metrics-update — write Prometheus textfile metrics snapshot."""
+    from utils.metrics import metrics_update
+    cfg   = _load_config()
+    iface = cfg.get("network", "vpn_interface", fallback="wg0")
+    metrics_update(iface=iface)
+    print("[metrics] metrics.prom updated")
+
+
+def _cmd_geoblock(args: argparse.Namespace) -> None:
+    """geoblock <CC...> — download and block all CIDRs for given country codes."""
+    from integrations.geoblock import block_country
+    for cc in args.country_codes:
+        blocked, skipped = block_country(cc.upper())
+        print(f"[geoblock] {cc.upper()}: +{blocked} CIDRs blocked, {skipped} skipped")
+
+
+def _cmd_geounblock(args: argparse.Namespace) -> None:
+    """geounblock <CC> — remove all CIDRs blocked for a country."""
+    from integrations.geoblock import unblock_country
+    removed = unblock_country(args.country_code.upper())
+    print(f"[geounblock] {args.country_code.upper()}: {removed} CIDRs removed")
+
+
+def _cmd_geolist(_args: argparse.Namespace) -> None:
+    """geolist — show blocked countries and CIDR counts."""
+    from integrations.geoblock import list_blocked
+    blocked = list_blocked()
+    if not blocked:
+        print("  No countries currently geo-blocked.")
+        return
+    print(f"\n  {'COUNTRY':<10} {'CIDRs':>6}")
+    print(f"  {'-'*9:<10} {'-'*5:>6}")
+    for cc, count in sorted(blocked.items()):
+        print(f"  {cc:<10} {count:>6}")
+    print()
+
+
+def _cmd_knockd(args: argparse.Namespace) -> None:
+    """knockd daemon — run the port-knock listener."""
+    from daemons.knockd import PortKnockDaemon
+    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    if args.knockd_cmd == "daemon":
+        PortKnockDaemon(config_path=cfg_path).run_daemon()
+    else:
+        _die(f"Unknown knockd subcommand: {args.knockd_cmd!r}")
+
+
+def _cmd_allow(args: argparse.Namespace) -> None:
+    from core.state import allow_ip
+    if allow_ip(args.ip):
+        print(f"[ok] Trusted {args.ip} (SSH override)")
+    else:
+        _die(f"Failed to add {args.ip} — is the ruleset loaded?")
+
+
+def _cmd_disallow(args: argparse.Namespace) -> None:
+    from core.state import disallow_ip
+    if disallow_ip(args.ip):
+        print(f"[ok] Removed {args.ip} from trusted set.")
+    else:
+        _die(f"{args.ip} not found in trusted_ips set.")
+
+
+def _cmd_ip_list(_args: argparse.Namespace) -> None:
+    from core.state import set_list, SET_BLOCKED, SET_TRUSTED
+    for label, set_name in [("Trusted IPs (SSH override)", SET_TRUSTED),
+                             ("Blocked IPs",               SET_BLOCKED)]:
+        entries = set_list(set_name)
+        print(f"\n  {label}  ({set_name})")
+        if entries:
+            for e in entries:
+                print(f"    • {e}")
+        else:
+            print("    (empty)")
+    print()
+
+
+def _cmd_docker_expose(args: argparse.Namespace) -> None:
+    from integrations.docker import add_expose
+    try:
+        add_expose(
+            host_port      = args.host_port,
+            container_ip   = args.container_ip,
+            container_port = args.container_port,
+            proto          = args.proto,
+            src            = getattr(args, "src", None),
+        )
+    except ValueError as exc:
+        _die(str(exc))
+
+
+def _cmd_docker_unexpose(args: argparse.Namespace) -> None:
+    from integrations.docker import remove_expose
+    remove_expose(args.host_port, args.proto)
+
+
+def _cmd_list_exposed(_args: argparse.Namespace) -> None:
+    from integrations.docker import list_exposed
+    entries = list_exposed()
+    if not entries:
+        print("  No ports currently exposed.")
+        return
+    print(f"\n  {'HOST PORT':<12} {'PROTO':<6} {'SRC RESTRICT':<20} {'CONTAINER DEST'}")
+    print(f"  {'-'*11:<12} {'-'*5:<6} {'-'*19:<20} {'-'*25}")
+    for e in entries:
+        src = e.get("src", "any")
+        print(f"  {e['host_port']:<12} {e['proto']:<6} {src:<20} "
+              f"{e['container_ip']}:{e['container_port']}")
+    print()
+
+
+def _cmd_profiles(_args: argparse.Namespace) -> None:
+    from core.profiles import list_profiles
+    print("\n  Available firewall profiles:\n")
+    for name, profile in sorted(list_profiles().items()):
+        tcp  = ", ".join(map(str, profile.cosmos_tcp))  or "none"
+        udp  = ", ".join(map(str, profile.cosmos_udp))  or "none"
+        plex = "yes" if profile.allow_plex_lan else "no"
+        print(f"  {name}")
+        print(f"    {profile.description}")
+        print(f"    cosmos_tcp={tcp}  cosmos_udp={udp}  plex_lan={plex}")
+        print()
+
+
+def _cmd_rules(_args: argparse.Namespace) -> None:
+    import subprocess
+    try:
+        result = subprocess.run(["nft", "list", "ruleset"],
+                                capture_output=True, text=True)
+    except OSError as exc:
+        _die(f"Failed to run 'nft': {exc}")
+    if result.returncode == 0:
+        print(result.stdout)
+    else:
+        _die(f"nft list ruleset failed: {result.stderr.strip()}")
+
+
+def _cmd_health(_args: argparse.Namespace) -> None:
+    from daemons.watchdog import NftWatchdog
+    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    report   = NftWatchdog(config_path=cfg_path).health()
+    print(json.dumps(report, indent=2))
+    sys.exit(0 if report["status"] == "HEALTHY" else 1)
+
+
+def _cmd_status(_args: argparse.Namespace) -> None:
+    """status — mobile-friendly vertical dashboard."""
+    from utils.formatter import build_status_report
+    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    print(build_status_report(cfg_path))
+
+
+def _cmd_firewall_report(args: argparse.Namespace) -> None:
+    """firewall-report — build status report and send it to Keybase."""
+    from utils.formatter import build_status_report
+    from utils.keybase import notify
+
+    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    report   = build_status_report(cfg_path, weekly=getattr(args, "weekly", False))
+    print(report)
+
+    ok = notify(
+        title    = "Good Morning — NFT Firewall Daily Report",
+        body     = report,
+        tags     = "shield",
+        priority = "default",
+    )
+    if not ok:
+        _die("Report built but Keybase notification failed — check [keybase] config.")
+
+
+def _cmd_maintenance(_args: argparse.Namespace) -> None:
+    """maintenance — prune old state backups and rotated project log files."""
+    import time as _time
+
+    cutoff    = _time.time() - 30 * 86_400   # 30 days ago
+    state_dir = _PROJECT_ROOT / "state"
+    removed   = 0
+
+    # ── State backups older than 30 days ──────────────────────────────────────
+    if state_dir.exists():
+        for f in sorted(state_dir.iterdir()):
+            if f.suffix == ".conf" and f.name.startswith("nftables_"):
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        removed += 1
+                        print(f"[maintenance] Removed old backup: {f.name}")
+                except OSError as exc:
+                    print(f"[warn] Could not remove {f.name}: {exc}")
+
+    # ── Rotated log files in project tree ─────────────────────────────────────
+    for pattern in ("*.log.1", "*.log.2", "*.log.gz", "*.log.*.gz"):
+        for f in _PROJECT_ROOT.rglob(pattern):
+            # Never touch anything outside the project directory
+            try:
+                f.relative_to(_PROJECT_ROOT)
+            except ValueError:
+                continue
+            try:
+                f.unlink()
+                removed += 1
+                print(f"[maintenance] Removed rotated log: {f.relative_to(_PROJECT_ROOT)}")
+            except OSError as exc:
+                print(f"[warn] Could not remove {f.relative_to(_PROJECT_ROOT)}: {exc}")
+
+    if removed:
+        print(f"[maintenance] Done — removed {removed} file(s).")
+    else:
+        print("[maintenance] Nothing to clean.")
+
+
+def _cmd_keybase_test(_args: argparse.Namespace) -> None:
+    from utils.keybase import notify
+    ok = notify(
+        title    = "NFT Firewall — test notification",
+        body     = "If you see this, Keybase notifications are working correctly.",
+        tags     = "white_check_mark",
+        priority = "default",
+    )
+    if ok:
+        print("[ok] Test notification sent.")
+    else:
+        _die("Notification failed — check Keybase config.")
+
+
+def _cmd_listener(args: argparse.Namespace) -> None:
+    from daemons.listener import KeybaseListener
+    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    if args.listener_cmd == "daemon":
+        KeybaseListener(config_path=cfg_path).run_daemon()
+    else:
+        _die(f"Unknown listener subcommand: {args.listener_cmd!r}")
+
+
+def _cmd_ssh_alert(args: argparse.Namespace) -> None:
+    from daemons.ssh_alert import SshAlertDaemon
+    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    if args.ssh_alert_cmd == "daemon":
+        SshAlertDaemon(config_path=cfg_path).run_daemon()
+    else:
+        _die(f"Unknown ssh-alert subcommand: {args.ssh_alert_cmd!r}")
+
+
+def _cmd_watchdog(args: argparse.Namespace) -> None:
+    from daemons.watchdog import NftWatchdog
+    cfg_path = str(_LOCAL_CONF) if _LOCAL_CONF.exists() else str(_SYSTEM_CONF)
+    wd = NftWatchdog(config_path=cfg_path)
+
+    if args.watchdog_cmd == "daemon":
+        wd.run_daemon()
+    elif args.watchdog_cmd == "status":
+        wd.status()
+    elif args.watchdog_cmd == "health":
+        report = wd.health()
+        print(json.dumps(report, indent=2))
+        sys.exit(0 if report["status"] == "HEALTHY" else 1)
+    else:
+        _die(f"Unknown watchdog subcommand: {args.watchdog_cmd!r}")
+
+
+# ── Parser construction ───────────────────────────────────────────────────────
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog            = "nft-firewall",
+        description     = "NFT Firewall & VPN Killswitch — modular edition",
+        formatter_class = argparse.RawDescriptionHelpFormatter,
+        epilog          = """
+Quick-start workflow:
+  1.  Edit config/firewall.ini  — set [network] phy_if, vpn_server_ip, etc.
+  2.  python3 src/main.py simulate cosmos-vpn-secure
+  3.  sudo python3 src/main.py apply cosmos-vpn-secure
+  4.  sudo python3 src/main.py backup
+  5.  sudo python3 src/main.py watchdog daemon
+        """.strip(),
+    )
+
+    sub = p.add_subparsers(dest="cmd", metavar="<command>")
+    sub.required = True
+
+    # ── Ruleset ───────────────────────────────────────────────────────────────
+    ap = sub.add_parser("apply",     help="Generate and apply a firewall profile")
+    ap.add_argument("profile",       help="Profile name (see 'profiles' command)")
+    ap.add_argument("--dry-run",     action="store_true",
+                    help="Print the generated ruleset without applying it")
+    ap.add_argument("--safe",        action="store_true",
+                    help="Auto-rollback unless you type CONFIRM within 60s")
+
+    sp = sub.add_parser("simulate",  help="Validate a profile with nft --check (no apply, no root needed)")
+    sp.add_argument("profile",       help="Profile name (see 'profiles' command)")
+
+    # ── State ─────────────────────────────────────────────────────────────────
+    sub.add_parser("backup",         help="Snapshot the current live ruleset to state/")
+
+    rp = sub.add_parser("restore",   help="Restore a ruleset from state/ (latest or specific file)")
+    rp.add_argument("file", nargs="?", metavar="FILE",
+                    help="Path to a specific backup file (default: most recent)")
+
+    # ── IP sets ───────────────────────────────────────────────────────────────
+    blk = sub.add_parser("block",    help="Block an IP/CIDR at runtime (no re-apply needed)")
+    blk.add_argument("ip")
+
+    ublk = sub.add_parser("unblock", help="Remove an IP/CIDR from the block list")
+    ublk.add_argument("ip")
+
+    alw = sub.add_parser("allow",    help="Add an IP to trusted set (SSH override from non-LAN)")
+    alw.add_argument("ip")
+
+    dalw = sub.add_parser("disallow", help="Remove an IP from the trusted set")
+    dalw.add_argument("ip")
+
+    sub.add_parser("ip-list",        help="List current blocked and trusted IPs")
+
+    # ── Docker ────────────────────────────────────────────────────────────────
+    ep = sub.add_parser("docker-expose",
+                        help="Add a container port to the expose registry")
+    ep.add_argument("host_port",      type=int,  help="Host-side port to forward from")
+    ep.add_argument("container_ip",              help="Container IP address")
+    ep.add_argument("container_port", type=int,  help="Port inside the container")
+    ep.add_argument("proto", nargs="?", default="tcp", choices=["tcp", "udp"])
+    ep.add_argument("--src", default=None, metavar="CIDR",
+                    help="Restrict to a source network, e.g. 192.168.1.0/24")
+
+    up = sub.add_parser("docker-unexpose",
+                        help="Remove a container port from the expose registry")
+    up.add_argument("host_port", type=int)
+    up.add_argument("proto", nargs="?", default="tcp", choices=["tcp", "udp"])
+
+    sub.add_parser("list-exposed",   help="Show currently exposed container ports")
+
+    # ── Watchdog ──────────────────────────────────────────────────────────────
+    wp     = sub.add_parser("watchdog", help="WireGuard health monitor")
+    wp_sub = wp.add_subparsers(dest="watchdog_cmd", metavar="<subcommand>")
+    wp_sub.required = True
+    wp_sub.add_parser("daemon",  help="Run the watchdog daemon loop (systemd ExecStart)")
+    wp_sub.add_parser("status",  help="One-shot human-readable status summary")
+    wp_sub.add_parser("health",  help="One-shot JSON health report (exit 0=healthy, 1=degraded)")
+
+    # ── Listener ──────────────────────────────────────────────────────────────
+    lp     = sub.add_parser("listener", help="Keybase ChatOps bot")
+    lp_sub = lp.add_subparsers(dest="listener_cmd", metavar="<subcommand>")
+    lp_sub.required = True
+    lp_sub.add_parser("daemon", help="Run the Keybase listener loop (systemd ExecStart)")
+
+    # ── SSH alert ─────────────────────────────────────────────────────────────
+    sa     = sub.add_parser("ssh-alert", help="SSH intrusion alerter")
+    sa_sub = sa.add_subparsers(dest="ssh_alert_cmd", metavar="<subcommand>")
+    sa_sub.required = True
+    sa_sub.add_parser("daemon", help="Run the SSH alert daemon loop (systemd ExecStart)")
+
+    # ── Knockd ────────────────────────────────────────────────────────────────
+    kp     = sub.add_parser("knockd", help="Port-knock daemon for stealth SSH access")
+    kp_sub = kp.add_subparsers(dest="knockd_cmd", metavar="<subcommand>")
+    kp_sub.required = True
+    kp_sub.add_parser("daemon", help="Run the port-knock daemon (systemd ExecStart)")
+
+    # ── Info & notifications ──────────────────────────────────────────────────
+    sub.add_parser("status",           help="Mobile-friendly vertical dashboard (all sections)")
+    frp = sub.add_parser("firewall-report",  help="Build status report and send it to Keybase (for daily cron)")
+    frp.add_argument("--weekly", action="store_true",
+                     help="Include weekly auto-block summary section")
+    sub.add_parser("profiles",         help="List available firewall profiles")
+    sub.add_parser("rules",            help="Print the live nftables ruleset")
+    sub.add_parser("health",           help="JSON health report (exit 0=healthy, 1=degraded)")
+    sub.add_parser("keybase-test",     help="Send a test Keybase notification")
+    sub.add_parser("maintenance",      help="Prune state backups >30 days old and rotated log files")
+    sub.add_parser("threat-update", help="Sync threat feed IPs into blocked_ips set (daily via timer)")
+    sub.add_parser("metrics-update", help="Write Prometheus textfile to /var/lib/nft-firewall/metrics.prom")
+
+    gp = sub.add_parser("geoblock",   help="Download and block all CIDRs for country codes (e.g. CN RU)")
+    gp.add_argument("country_codes", nargs="+", metavar="CC")
+
+    gup = sub.add_parser("geounblock", help="Remove all CIDRs blocked for a country")
+    gup.add_argument("country_code", metavar="CC")
+
+    sub.add_parser("geolist", help="Show blocked countries and CIDR counts")
+
+    return p
+
+
+# ── Dispatch table ────────────────────────────────────────────────────────────
+
+_HANDLERS = {
+    "apply"           : _cmd_apply,
+    "simulate"        : _cmd_simulate,
+    "backup"          : _cmd_backup,
+    "restore"         : _cmd_restore,
+    "block"           : _cmd_block,
+    "unblock"         : _cmd_unblock,
+    "allow"           : _cmd_allow,
+    "disallow"        : _cmd_disallow,
+    "ip-list"         : _cmd_ip_list,
+    "docker-expose"   : _cmd_docker_expose,
+    "docker-unexpose" : _cmd_docker_unexpose,
+    "list-exposed"    : _cmd_list_exposed,
+    "watchdog"        : _cmd_watchdog,
+    "listener"        : _cmd_listener,
+    "ssh-alert"       : _cmd_ssh_alert,
+    "knockd"          : _cmd_knockd,
+    "status"          : _cmd_status,
+    "firewall-report" : _cmd_firewall_report,
+    "profiles"        : _cmd_profiles,
+    "rules"           : _cmd_rules,
+    "health"          : _cmd_health,
+    "keybase-test"    : _cmd_keybase_test,
+    "maintenance"     : _cmd_maintenance,
+    "threat-update"   : _cmd_threat_update,
+    "metrics-update"  : _cmd_metrics_update,
+    "geoblock"        : _cmd_geoblock,
+    "geounblock"      : _cmd_geounblock,
+    "geolist"         : _cmd_geolist,
+}
+
+
+def main() -> None:
+    """Parse arguments and dispatch to the appropriate command handler."""
+    parser  = _build_parser()
+    args    = parser.parse_args()
+    handler = _HANDLERS.get(args.cmd)
+    if handler is None:
+        parser.print_help()
+        sys.exit(1)
+    handler(args)
+
+
+if __name__ == "__main__":
+    main()
