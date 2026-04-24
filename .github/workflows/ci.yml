@@ -1,0 +1,43 @@
+name: NFT Firewall CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - v12-dev
+      - v12.1-smartops-safety
+      - main
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system tools
+        run: |
+          sudo apt update
+          sudo apt install -y shellcheck nftables
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest ruff
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: ShellCheck
+        run: |
+          find . -type f \( -name "*.sh" -o -path "./scripts/*" \) -print0 \
+            | xargs -0 -r shellcheck
+
+      - name: Pytest
+        run: pytest -q
