@@ -358,6 +358,29 @@ def step0_configure(reconfigure: bool = False) -> None:
 
     ssh_port = _ask("SSH daemon port", default=_detect_ssh_port())
 
+    _existing_lan_full_access = ""
+    _existing_lan_allow_ports = ""
+    if _CONF_FILE.exists():
+        try:
+            _lc = configparser.ConfigParser()
+            _lc.read(str(_CONF_FILE))
+            _existing_lan_full_access = _lc.get("network", "lan_full_access", fallback="")
+            _existing_lan_allow_ports = _lc.get("network", "lan_allow_ports", fallback="")
+        except Exception:
+            pass
+
+    lan_full_access = _ask(
+        "LAN full access (true/false)",
+        default=_existing_lan_full_access or "false",
+    ).lower()
+    if lan_full_access not in {"true", "false", "yes", "no", "1", "0"}:
+        _warn("LAN full access must be true/false — using false")
+        lan_full_access = "false"
+    lan_allow_ports = _ask_ports(
+        "LAN allowed TCP ports when strict",
+        default=_existing_lan_allow_ports or f"{ssh_port}, 32400",
+    )
+
     # ── Open ports ────────────────────────────────────────────────────────────
     print()
     print("  \033[1mOpen ports on the VPN interface\033[0m")
@@ -420,7 +443,10 @@ def step0_configure(reconfigure: bool = False) -> None:
         "vpn_server_ip":   vpn_ip,
         "vpn_server_port": vpn_port,
         "ssh_port":        ssh_port,
+        "lan_full_access": lan_full_access,
     }
+    if lan_allow_ports:
+        network_section["lan_allow_ports"] = lan_allow_ports
     if extra_ports:
         network_section["extra_ports"] = extra_ports
     if torrent_port:
@@ -450,6 +476,9 @@ def step0_configure(reconfigure: bool = False) -> None:
     print(f"    LAN        : {lan_net}")
     print(f"    VPN server : {vpn_ip}:{vpn_port}")
     print(f"    SSH port   : {ssh_port}")
+    print(f"    LAN mode   : {'full access' if lan_full_access in {'true', 'yes', '1'} else 'strict'}")
+    if lan_allow_ports:
+        print(f"    LAN ports  : {lan_allow_ports}")
     if extra_ports:
         print(f"    Extra ports: {extra_ports}")
     if torrent_port:

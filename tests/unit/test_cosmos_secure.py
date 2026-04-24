@@ -67,6 +67,8 @@ vpn_interface = wg0
 vpn_server_ip = 198.51.100.10
 vpn_server_port = 51820
 lan_net = 192.168.1.0/24
+lan_full_access = false
+lan_allow_ports = 58473,32400
 
 [cosmos]
 enabled = true
@@ -79,6 +81,8 @@ public_ports = 80,443
     ruleset = generate_ruleset(ruleset_cfg)
 
     assert ruleset_cfg.cosmos_public_ports == [80, 443]
+    assert ruleset_cfg.lan_full_access is False
+    assert ruleset_cfg.lan_allow_ports == [58473, 32400]
     assert 'iifname "wg0" tcp dport { 80, 443 } accept' in ruleset
     assert 'iifname "eth0" tcp dport { 80, 443 } accept' not in ruleset
     assert "4242" not in ruleset
@@ -126,6 +130,61 @@ def test_cosmos_public_input_accept_is_not_duplicated_by_extra_ports():
     assert 'iifname "wg0" tcp dport { 8443 } accept' in ruleset
     assert 'iifname "enp88s0" tcp dport { 80, 443 } accept' not in ruleset
     assert "udp dport 4242" not in ruleset
+
+
+def test_strict_lan_mode_does_not_allow_random_lan_port():
+    cfg = RulesetConfig(
+        phy_if="enp88s0",
+        vpn_interface="wg0",
+        vpn_server_ip="198.51.100.10",
+        vpn_server_port="51820",
+        lan_net="192.168.50.0/24",
+        ssh_port=58473,
+        lan_full_access=False,
+        lan_allow_ports=[58473, 32400],
+        cosmos_public_ports=[80, 443],
+    )
+    ruleset = generate_ruleset(cfg)
+
+    assert 'iifname "enp88s0" ip saddr 192.168.50.0/24 accept' not in ruleset
+    assert 'iifname "enp88s0" ip saddr 192.168.50.0/24 tcp dport 9999 accept' not in ruleset
+    assert 'iifname "enp88s0" ip saddr 192.168.50.0/24 drop' in ruleset
+
+
+def test_strict_lan_mode_allows_configured_lan_ports_and_preserves_cosmos():
+    cfg = RulesetConfig(
+        phy_if="enp88s0",
+        vpn_interface="wg0",
+        vpn_server_ip="198.51.100.10",
+        vpn_server_port="51820",
+        lan_net="192.168.50.0/24",
+        ssh_port=58473,
+        lan_full_access=False,
+        lan_allow_ports=[58473, 32400],
+        cosmos_public_ports=[80, 443],
+    )
+    ruleset = generate_ruleset(cfg)
+
+    assert 'iifname "enp88s0" ip saddr 192.168.50.0/24 tcp dport 58473 accept' in ruleset
+    assert 'iifname "enp88s0" ip saddr 192.168.50.0/24 tcp dport { 32400, 58473 } accept' in ruleset
+    assert 'iifname "wg0" tcp dport { 80, 443 } accept' in ruleset
+    assert 'iifname "enp88s0" tcp dport { 80, 443 } accept' not in ruleset
+    assert "udp dport 4242" not in ruleset
+
+
+def test_lan_full_access_preserves_legacy_trusted_lan_behavior():
+    cfg = RulesetConfig(
+        phy_if="enp88s0",
+        vpn_interface="wg0",
+        vpn_server_ip="198.51.100.10",
+        vpn_server_port="51820",
+        lan_net="192.168.50.0/24",
+        lan_full_access=True,
+    )
+    ruleset = generate_ruleset(cfg)
+
+    assert 'iifname "enp88s0" ip saddr 192.168.50.0/24 accept' in ruleset
+    assert 'iifname "enp88s0" ip saddr 192.168.50.0/24 drop' not in ruleset
 
 
 def test_installed_load_config_prefers_etc_nft_firewall(monkeypatch, tmp_path):

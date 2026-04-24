@@ -121,11 +121,22 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
     torrent_raw = cfg.get("network", "torrent_port", fallback="").strip()
     torrent_port: Optional[int] = _parse_int(torrent_raw, "torrent_port") if torrent_raw else None
 
+    from utils.validation import validate_port
+
+    lan_full_access = cfg.getboolean("network", "lan_full_access", fallback=False)
+    lan_allow_raw = cfg.get("network", "lan_allow_ports", fallback="").strip()
+    lan_allow_ports: List[int] = []
+    if lan_allow_raw:
+        lan_allow_ports = [
+            validate_port(p.strip(), "lan_allow_ports")
+            for p in lan_allow_raw.replace(";", ",").split(",")
+            if p.strip()
+        ]
+
     cosmos_enabled = cfg.getboolean("cosmos", "enabled", fallback=profile.cosmos_enabled)
     cosmos_ports_raw = cfg.get("cosmos", "public_ports", fallback="").strip()
     cosmos_public_ports: List[int] = []
     if cosmos_enabled and cosmos_ports_raw:
-        from utils.validation import validate_port
         cosmos_public_ports = [
             validate_port(p.strip(), "cosmos.public_ports")
             for p in cosmos_ports_raw.replace(";", ",").split(",")
@@ -142,6 +153,8 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
         vpn_server_ip      = cfg.get("network", "vpn_server_ip",      fallback=""),
         vpn_server_port    = cfg.get("network", "vpn_server_port",    fallback=""),
         lan_net            = cfg.get("network", "lan_net",            fallback="192.168.1.0/24"),
+        lan_full_access    = lan_full_access,
+        lan_allow_ports    = lan_allow_ports,
         container_supernet = container_supernet,
         docker_networks    = docker_networks,
         ssh_port           = _parse_int(cfg.get("network", "ssh_port", fallback="22"), "ssh_port"),

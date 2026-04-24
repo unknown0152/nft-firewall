@@ -51,6 +51,11 @@ class RulesetConfig:
         Remote WireGuard endpoint UDP port.
     lan_net:
         Local LAN subnet in CIDR notation, e.g. ``"192.168.1.0/24"``.
+    lan_full_access:
+        When ``True``, preserve the legacy trusted-LAN behavior and allow all
+        LAN input on the physical interface.
+    lan_allow_ports:
+        TCP ports reachable from LAN when ``lan_full_access`` is ``False``.
     container_supernet:
         Docker container IP supernet (covers all bridge /28 networks).
         Default ``"172.16.0.0/12"``.
@@ -84,6 +89,8 @@ class RulesetConfig:
     vpn_server_ip:      str           = ""
     vpn_server_port:    str           = ""
     lan_net:            str           = "192.168.1.0/24"
+    lan_full_access:    bool          = False
+    lan_allow_ports:    List[int]     = field(default_factory=list)
     container_supernet: str           = "172.16.0.0/12"
     docker_networks:    List[str]     = field(default_factory=list)
 
@@ -428,7 +435,13 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
         a("        tcp dport 32400 drop   # block from internet/VPN")
         a("")
 
-    a(f"        {PHY} ip saddr {cfg.lan_net} accept   # general LAN access (last positive rule)")
+    if cfg.lan_full_access:
+        a(f"        {PHY} ip saddr {cfg.lan_net} accept   # trusted LAN full access")
+    else:
+        if cfg.lan_allow_ports:
+            a("        # Strict LAN mode: only configured LAN TCP services are reachable.")
+            a(f"        {PHY} ip saddr {cfg.lan_net} tcp dport {_pset(cfg.lan_allow_ports)} accept")
+        a(f"        {PHY} ip saddr {cfg.lan_net} drop   # strict LAN default deny")
     a("")
 
     a('        counter log prefix "[nft-in-drop] " flags all limit rate 5/minute')

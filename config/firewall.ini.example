@@ -25,6 +25,15 @@ vpn_interface   = wg0
 # Local LAN subnet in CIDR notation.  Used for SSH and FORWARD allow rules.
 lan_net         = REDACTED_SECRET
 
+# LAN input policy on the physical interface.
+# false = SSH plus lan_allow_ports only; all other LAN input is dropped.
+# true  = legacy trusted-LAN behavior; LAN can reach all host ports.
+lan_full_access = false
+
+# TCP ports reachable from LAN when lan_full_access=false.
+# SSH is always allowed from LAN separately; include other local services here.
+lan_allow_ports = 58473,32400
+
 # WireGuard server public endpoint IP.
 # This is the ONLY hole in the OUTPUT chain: packets are accepted only when
 # they carry the wg-quick kernel fwmark (0xca6c = 51820).  No other process
