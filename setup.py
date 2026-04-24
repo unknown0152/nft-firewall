@@ -51,6 +51,8 @@ SUDOERS_FILE = Path("/etc/sudoers.d/nft-firewall")
 SYSTEMD_DST  = Path("/etc/systemd/system")
 SYSTEMD_SRC  = Path(__file__).resolve().parent / "systemd"
 PYTHON_BIN   = "/usr/bin/python3"
+FW_BIN       = Path("/usr/local/bin/fw")
+WRAPPER_DIR  = Path("/usr/local/lib/nft-firewall")
 
 # Long-running daemons (restarted on every install)
 ACTIVE_SERVICES = ["nft-watchdog", "nft-listener", "nft-ssh-alert"]
@@ -407,6 +409,17 @@ def step2_install_code() -> None:
     if main_py.exists():
         main_py.chmod(0o755)
 
+    setup_src = project_root / "setup.py"
+    if setup_src.exists():
+        shutil.copy2(setup_src, INSTALL_DIR / "setup.py")
+        (INSTALL_DIR / "setup.py").chmod(0o755)
+
+    fw_src = project_root / "scripts" / "fw"
+    if fw_src.exists():
+        shutil.copy2(fw_src, FW_BIN)
+        FW_BIN.chmod(0o755)
+        _ok(f"Installed fw wrapper -> {FW_BIN}")
+
 
 # ── Step 3: Directories & ownership ──────────────────────────────────────────
 
@@ -430,6 +443,7 @@ def step4_install_sudoers() -> None:
     _header("Step 4 — Sudoers (Least-Privilege Grants)")
 
     keybase_user = _read_keybase_user()
+    _install_sudo_wrappers()
 
     # Build the sudoers fragment
     fragment_lines = [
@@ -439,22 +453,15 @@ def step4_install_sudoers() -> None:
         "",
         f"Defaults:{SYSTEM_USER} !requiretty",
         "",
-        "# Firewall & VPN operations required by nft-watchdog and nft-ssh-alert",
+        "# Firewall & VPN operations via argument-checking wrapper scripts.",
         f"{SYSTEM_USER} ALL=(root) NOPASSWD: \\",
-        "    /usr/sbin/nft, \\",
-        "    /usr/bin/wg, \\",
-        "    /usr/bin/wg-quick, \\",
-        "    /sbin/ip, \\",
-        "    /usr/sbin/ip, \\",
-        "    /usr/bin/ip, \\",
-        "    /usr/sbin/conntrack, \\",
-        "    /usr/bin/conntrack, \\",
-        "    /usr/bin/systemctl start wg-quick@*, \\",
-        "    /usr/bin/systemctl stop wg-quick@*, \\",
-        "    /usr/bin/systemctl restart wg-quick@*, \\",
-        "    /usr/bin/systemctl reload wg-quick@*, \\",
-        "    /usr/bin/fail2ban-client, \\",
-        f"    {PYTHON_BIN} {INSTALL_DIR}/src/main.py *",
+        f"    {FW_BIN}, \\",
+        f"    {WRAPPER_DIR}/fw-nft, \\",
+        f"    {WRAPPER_DIR}/fw-wg, \\",
+        f"    {WRAPPER_DIR}/fw-wg-quick, \\",
+        f"    {WRAPPER_DIR}/fw-ip, \\",
+        f"    {WRAPPER_DIR}/fw-conntrack, \\",
+        f"    {WRAPPER_DIR}/fw-systemctl",
         "",
     ]
 
@@ -552,6 +559,82 @@ def _install_keybase_wrapper(kb_user: str) -> None:
     _ok(f"Installed {wrapper}  (HOME={kb_home}, XDG_RUNTIME_DIR=/run/user/{kb_uid})")
 
 
+def _write_executable(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    path.chmod(0o755)
+
+
+def _install_sudo_wrappers() -> None:
+    """Install root wrapper scripts that validate privileged command arguments."""
+    _write_executable(WRAPPER_DIR / "fw-nft", """#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  list)
+    case "${2:-}" in
+      ruleset) exec /usr/sbin/nft list ruleset ;;
+      set) [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in blocked_ips|trusted_ips|dk_ips) exec /usr/sbin/nft "$@" ;; esac ;;
+      chain) [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in input|output|forward) exec /usr/sbin/nft "$@" ;; esac ;;
+    esac
+    ;;
+  add|delete)
+    [ "${2:-}" = "element" ] && [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in blocked_ips|trusted_ips|dk_ips) exec /usr/sbin/nft "$@" ;; esac
+    [ "${1:-}" = "delete" ] && [ "${2:-}" = "rule" ] && [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && [ "${5:-}" = "input" ] && [ "${6:-}" = "handle" ] && exec /usr/sbin/nft "$@"
+    ;;
+  --check) [ "${2:-}" = "--file" ] && exec /usr/sbin/nft "$@" ;;
+  --file|-f) [ "${2:-}" = "/etc/nftables.conf" ] && exec /usr/sbin/nft "$@" ;;
+  --echo) [ "${2:-}" = "--json" ] && [ "${3:-}" = "add" ] && [ "${4:-}" = "rule" ] && [ "${5:-}" = "ip" ] && [ "${6:-}" = "firewall" ] && [ "${7:-}" = "input" ] && exec /usr/sbin/nft "$@" ;;
+esac
+echo "fw-nft: denied arguments: $*" >&2
+exit 126
+""")
+    _write_executable(WRAPPER_DIR / "fw-wg", """#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  show) exec /usr/bin/wg "$@" ;;
+  set) [ "${3:-}" = "peer" ] && [ "${5:-}" = "endpoint" ] && exec /usr/bin/wg "$@" ;;
+esac
+echo "fw-wg: denied arguments: $*" >&2
+exit 126
+""")
+    _write_executable(WRAPPER_DIR / "fw-wg-quick", """#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  up|down) exec /usr/bin/wg-quick "$@" ;;
+esac
+echo "fw-wg-quick: denied arguments: $*" >&2
+exit 126
+""")
+    _write_executable(WRAPPER_DIR / "fw-ip", """#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  link) case "${2:-}" in show|delete) exec /usr/bin/ip "$@" ;; esac ;;
+  addr) [ "${2:-}" = "show" ] && exec /usr/bin/ip "$@" ;;
+  -4) [ "${2:-}" = "addr" ] && [ "${3:-}" = "show" ] && exec /usr/bin/ip "$@" ;;
+  -o) [ "${2:-}" = "link" ] && [ "${3:-}" = "show" ] && exec /usr/bin/ip "$@" ;;
+esac
+echo "fw-ip: denied arguments: $*" >&2
+exit 126
+""")
+    _write_executable(WRAPPER_DIR / "fw-conntrack", """#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = "-F" ] && exec /usr/sbin/conntrack "$@"
+echo "fw-conntrack: denied arguments: $*" >&2
+exit 126
+""")
+    _write_executable(WRAPPER_DIR / "fw-systemctl", """#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  start|stop|restart|reload)
+    case "${2:-}" in wg-quick@*.service|wg-quick@*) exec /usr/bin/systemctl "$@" ;; esac
+    ;;
+esac
+echo "fw-systemctl: denied arguments: $*" >&2
+exit 126
+""")
+    _ok(f"Installed sudo wrapper scripts in {WRAPPER_DIR}")
+
+
 # ── Step 5: Systemd unit files ────────────────────────────────────────────────
 
 # Each tuple is (regex pattern, replacement) applied line-by-line.
@@ -628,25 +711,10 @@ def step5_deploy_services() -> None:
 # ── Step 7: Apply ruleset (writes watchdog-markers.json) ─────────────────────
 
 def step7_apply_ruleset() -> None:
-    """Apply the firewall profile so watchdog-markers.json is written before daemons start."""
+    """Deprecated: setup must not apply live firewall rules automatically."""
     _header("Step 7 — Apply Ruleset")
-
-    cfg = configparser.ConfigParser()
-    for ini in (INSTALL_DIR / "config" / "firewall.ini", _CONF_FILE):
-        if ini.exists():
-            cfg.read(str(ini))
-            break
-
-    profile = cfg.get("install", "profile", fallback="cosmos-vpn-secure")
-    main_py = INSTALL_DIR / "src" / "main.py"
-
-    _info(f"Applying firewall profile '{profile}' ...")
-    r = _run([PYTHON_BIN, str(main_py), "apply", profile], check=False)
-    if r.returncode == 0:
-        _ok(f"Ruleset applied — watchdog-markers.json written")
-    else:
-        _warn(f"apply returned non-zero (exit {r.returncode}): {r.stderr.strip()}")
-        _warn("Daemons will start but watchdog may alert until apply succeeds manually.")
+    _warn("Skipped: setup never applies live firewall rules.")
+    _info("Run 'sudo fw doctor' first, then 'sudo fw safe-apply <profile>' when ready.")
 
 
 # ── Step 6: Reload & restart ──────────────────────────────────────────────────
@@ -693,7 +761,6 @@ def cmd_install(reconfigure: bool = False) -> None:
     step3_scaffold_dirs()
     step4_install_sudoers()
     step5_deploy_services()
-    step7_apply_ruleset()       # apply ruleset + write markers BEFORE starting daemons
     step6_reload_and_restart()
 
     print()
@@ -702,6 +769,7 @@ def cmd_install(reconfigure: bool = False) -> None:
     print(f"    Running as  : {SYSTEM_USER}")
     print(f"    Logs        : journalctl -u nft-watchdog -f")
     print(f"    Sudoers     : {SUDOERS_FILE}")
+    print(f"    Apply rules : sudo fw doctor && sudo fw safe-apply <profile>")
 
 
 def cmd_status() -> None:

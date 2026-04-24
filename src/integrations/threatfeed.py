@@ -20,6 +20,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from utils.validation import validate_block_target
+
 # ── Paths & constants ─────────────────────────────────────────────────────────
 
 _STATE_FILE          = Path("/var/lib/nft-firewall/threatfeed-state.json")
@@ -163,11 +165,11 @@ def _fetch_feed(url: str) -> "list[str]":
 
 # ── /8 guard ─────────────────────────────────────────────────────────────────
 
-def _apply_8_guard(ip: str) -> bool:
-    """Return ``True`` if *ip* covers no more than a /8 worth of addresses.
+def _apply_block_guard(ip: str) -> bool:
+    """Return ``True`` if *ip* is safe to insert into blocked_ips.
 
-    Prints a warning and returns ``False`` for supernets larger than a /8 to
-    prevent accidentally black-holing large swaths of the internet.
+    This uses the shared block-target validator, including never_block defaults
+    and the /8 maximum-size guard.
 
     Parameters
     ----------
@@ -179,19 +181,10 @@ def _apply_8_guard(ip: str) -> bool:
     bool
         ``True`` if the prefix is /8 or more specific, ``False`` otherwise.
     """
-    try:
-        net = ipaddress.ip_network(ip, strict=False)
-    except ValueError:
-        print(f"[threatfeed] WARNING: invalid IP/CIDR in feed, skipping: {ip!r}")
-        return False
-
-    if net.num_addresses <= 2 ** 24:
+    result = validate_block_target(ip)
+    if result.ok:
         return True
-
-    print(
-        f"[threatfeed] WARNING: refusing to block {ip} — prefix covers "
-        f"{net.num_addresses:,} addresses (larger than /8)"
-    )
+    print(f"[threatfeed] WARNING: {result.reason}, skipping: {ip!r}")
     return False
 
 
@@ -229,7 +222,7 @@ def sync(
 
     added = 0
     for ip in to_add:
-        if _apply_8_guard(ip):
+        if _apply_block_guard(ip):
             if block_ip(ip):
                 added += 1
 

@@ -65,6 +65,8 @@ class RulesetConfig:
         UDP ports used by Cosmos Constellation VPN.
     allow_plex_lan:
         When ``True``, open port 32400 for LAN-only Plex direct play.
+    blocked_ips/trusted_ips/dk_ips:
+        Persisted dynamic set members to preload after a ruleset reload.
     """
 
     # Required
@@ -93,6 +95,11 @@ class RulesetConfig:
     cosmos_udp:     List[int] = field(default_factory=list)
     allow_plex_lan: bool      = False
 
+    # Persisted dynamic sets
+    blocked_ips: List[str] = field(default_factory=list)
+    trusted_ips: List[str] = field(default_factory=list)
+    dk_ips:      List[str] = field(default_factory=list)
+
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -116,6 +123,18 @@ def _iface_vars(cfg: RulesetConfig) -> Dict[str, str]:
 def _pset(ports) -> str:
     """Format a collection of ports as an nftables set literal, e.g. ``{ 22, 80 }``."""
     return "{ " + ", ".join(str(p) for p in sorted(ports)) + " }"
+
+
+def _emit_dynamic_set(lines: List[str], name: str, comment: str, elements: List[str]) -> None:
+    """Append an interval ipv4_addr set with optional persisted elements."""
+    a = lines.append
+    a(f"    # {comment}")
+    a(f"    set {name} {{")
+    a("        type ipv4_addr; flags interval")
+    if elements:
+        a("        elements = { " + ", ".join(sorted(set(elements))) + " }")
+    a("    }")
+    a("")
 
 
 def _build_header(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]:
@@ -267,21 +286,24 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a("# ===================================================================")
     a("table ip firewall {")
     a("")
-    a("    # Runtime IP block list — drop without re-apply.")
-    a("    set blocked_ips {")
-    a("        type ipv4_addr; flags interval")
-    a("    }")
-    a("")
-    a("    # Trusted admin IPs — SSH override from non-LAN addresses.")
-    a("    set trusted_ips {")
-    a("        type ipv4_addr; flags interval")
-    a("    }")
-    a("")
-    a("    # DK GeoIP set — SSH allowed from Danish IPs.")
-    a("    set dk_ips {")
-    a("        type ipv4_addr; flags interval")
-    a("    }")
-    a("")
+    _emit_dynamic_set(
+        L,
+        "blocked_ips",
+        "Runtime IP block list — persisted and preloaded after reload.",
+        cfg.blocked_ips,
+    )
+    _emit_dynamic_set(
+        L,
+        "trusted_ips",
+        "Trusted public admin IPs — SSH override from non-LAN addresses.",
+        cfg.trusted_ips,
+    )
+    _emit_dynamic_set(
+        L,
+        "dk_ips",
+        "DK GeoIP set — SSH allowed from Danish IPs.",
+        cfg.dk_ips,
+    )
     a("    # Bogon set — RFC-1918 ranges for anti-spoofing.")
     a("    set bogons {")
     a("        type ipv4_addr; flags interval")

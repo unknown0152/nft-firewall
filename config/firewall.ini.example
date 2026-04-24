@@ -47,6 +47,14 @@ extra_ports     = REDACTED_SECRET
 torrent_port    = REDACTED_SECRET
 
 # -----------------------------------------------------------------------------
+# [safety] — ranges that must never enter blocked_ips
+# LAN subnet is always protected automatically; add static admin/VPN/provider
+# ranges here as comma or space separated CIDRs.
+# -----------------------------------------------------------------------------
+[safety]
+never_block     = 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12
+
+# -----------------------------------------------------------------------------
 # [keybase] — ChatOps bot identity
 # Alerts (AUTO-BANNED, VPN Down, SSH Login, etc.) are posted to this team/channel.
 # Two-way bot commands (!status, !block, !unblock, !ip-list, !top) are received

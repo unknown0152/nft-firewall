@@ -57,6 +57,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _STATE_DIR    = _PROJECT_ROOT / "state"
 _PERSISTENT_F = _STATE_DIR / "persistent_ips.json"
 
+
+def _sudo_nft_args(*args: str) -> List[str]:
+    wrapper = Path("/usr/local/lib/nft-firewall/fw-nft")
+    if wrapper.exists():
+        return ["sudo", str(wrapper), *args]
+    return ["sudo", "nft", *args]
+
 # ── Geo cache ──────────────────────────────────────────────────────────────────
 
 _geo_cache: Dict[str, Tuple[Dict, float]] = {}   # ip → (data, expires_at)
@@ -129,7 +136,7 @@ def read_blocked_ips() -> List[str]:
     """Return all IP/CIDR entries currently in the nftables blocked_ips set."""
     try:
         r = subprocess.run(
-            ["sudo", "nft", "list", "set", "ip", "firewall", "blocked_ips"],
+            _sudo_nft_args("list", "set", "ip", "firewall", "blocked_ips"),
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode != 0:
@@ -244,7 +251,7 @@ def chain_drop_counter(chain: str) -> int:
     """
     try:
         r = subprocess.run(
-            ["sudo", "nft", "list", "chain", "ip", "firewall", chain],
+            _sudo_nft_args("list", "chain", "ip", "firewall", chain),
             capture_output=True, text=True, timeout=5,
         )
         # The log/drop rule is always the last non-empty rule;

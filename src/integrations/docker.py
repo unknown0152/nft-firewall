@@ -37,6 +37,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from utils.validation import validate_ipv4_network, validate_port
+
 # ── Paths & constants ─────────────────────────────────────────────────────────
 
 DAEMON_JSON: Path = Path("/etc/docker/daemon.json")
@@ -235,21 +237,19 @@ def add_expose(
     ValueError
         If any argument fails validation.
     """
-    try:
-        ipaddress.ip_address(container_ip)
-    except ValueError:
+    result = validate_ipv4_network(container_ip, allow_network=False)
+    if not result.ok:
         raise ValueError(f"Invalid container IP: {container_ip!r}")
+    container_ip = result.value
 
     if src is not None:
-        try:
-            ipaddress.ip_network(src, strict=False)
-        except ValueError:
+        src_result = validate_ipv4_network(src)
+        if not src_result.ok:
             raise ValueError(f"Invalid src network: {src!r}")
+        src = src_result.value
 
-    if not (1 <= host_port <= 65535):
-        raise ValueError(f"host_port must be 1–65535, got {host_port}")
-    if not (1 <= container_port <= 65535):
-        raise ValueError(f"container_port must be 1–65535, got {container_port}")
+    host_port = validate_port(host_port, "host_port")
+    container_port = validate_port(container_port, "container_port")
 
     entries = load_registry(path)
     for entry in entries:

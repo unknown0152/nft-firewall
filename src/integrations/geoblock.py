@@ -20,6 +20,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from utils.validation import validate_block_target
+
 # ── Paths & constants ─────────────────────────────────────────────────────────
 
 _STATE_FILE = Path("/var/lib/nft-firewall/geoblock-state.json")
@@ -110,11 +112,11 @@ def _fetch_country(cc: str) -> "list[str]":
 
 # ── /8 guard ──────────────────────────────────────────────────────────────────
 
-def _apply_8_guard(cidr: str) -> bool:
-    """Return ``True`` if *cidr* covers no more than a /8 worth of addresses.
+def _apply_block_guard(cidr: str) -> bool:
+    """Return ``True`` if *cidr* is safe to insert into blocked_ips.
 
-    Prints a warning and returns ``False`` for supernets larger than a /8 to
-    prevent accidentally black-holing large swaths of the internet.
+    This uses the shared block-target validator, including never_block defaults
+    and the /8 maximum-size guard.
 
     Parameters
     ----------
@@ -126,19 +128,10 @@ def _apply_8_guard(cidr: str) -> bool:
     bool
         ``True`` if the prefix is /8 or more specific, ``False`` otherwise.
     """
-    try:
-        net = ipaddress.ip_network(cidr, strict=False)
-    except ValueError:
-        print(f"[geoblock] WARNING: invalid CIDR, skipping: {cidr!r}")
-        return False
-
-    if net.num_addresses <= 2 ** 24:
+    result = validate_block_target(cidr)
+    if result.ok:
         return True
-
-    print(
-        f"[geoblock] WARNING: refusing to block {cidr} — prefix covers "
-        f"{net.num_addresses:,} addresses (larger than /8)"
-    )
+    print(f"[geoblock] WARNING: {result.reason}, skipping: {cidr!r}")
     return False
 
 
@@ -179,7 +172,7 @@ def block_country(cc: str) -> "tuple[int, int]":
         if cidr in existing:
             skipped_count += 1
             continue
-        if not _apply_8_guard(cidr):
+        if not _apply_block_guard(cidr):
             skipped_count += 1
             continue
         if block_ip(cidr):

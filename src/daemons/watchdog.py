@@ -377,6 +377,14 @@ class NftWatchdog:
     _PRIVILEGED_CMDS: frozenset = frozenset(
         ["nft", "wg", "wg-quick", "ip", "conntrack", "systemctl"]
     )
+    _WRAPPERS: Dict[str, str] = {
+        "nft": "/usr/local/lib/nft-firewall/fw-nft",
+        "wg": "/usr/local/lib/nft-firewall/fw-wg",
+        "wg-quick": "/usr/local/lib/nft-firewall/fw-wg-quick",
+        "ip": "/usr/local/lib/nft-firewall/fw-ip",
+        "conntrack": "/usr/local/lib/nft-firewall/fw-conntrack",
+        "systemctl": "/usr/local/lib/nft-firewall/fw-systemctl",
+    }
 
     def _run(
         self, cmd: List[str], timeout: int = 15
@@ -389,7 +397,11 @@ class NftWatchdog:
         """
         binary = Path(cmd[0]).name
         if binary in self._PRIVILEGED_CMDS:
-            cmd = ["sudo"] + list(cmd)
+            wrapper = self._WRAPPERS.get(binary)
+            if wrapper and Path(wrapper).exists():
+                cmd = ["sudo", wrapper] + list(cmd[1:])
+            else:
+                cmd = ["sudo"] + list(cmd)
         try:
             r = subprocess.run(
                 cmd, capture_output=True, text=True, check=False, timeout=timeout

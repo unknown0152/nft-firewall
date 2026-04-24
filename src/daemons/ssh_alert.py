@@ -507,10 +507,15 @@ class SshAlertDaemon:
         from utils.keybase import notify
 
         geo     = _geo_label(ip)
-        main_py = str(_PROJECT_ROOT / "src" / "main.py")
+        fw = Path("/usr/local/bin/fw")
+        if fw.exists():
+            cmd = ["sudo", str(fw), "block", ip]
+        else:
+            main_py = str(_PROJECT_ROOT / "src" / "main.py")
+            cmd = ["sudo", sys.executable, main_py, "block", ip]
 
         result = subprocess.run(
-            ["sudo", sys.executable, main_py, "block", ip],
+            cmd,
             capture_output=True, text=True, timeout=10,
         )
         blocked_ok = result.returncode == 0

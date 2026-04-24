@@ -159,7 +159,11 @@ def _firewall_open_ports() -> List[Tuple[int, str, str]]:
         Path("/opt/nft-firewall/config/firewall.ini"),
         Path("/etc/nft-watchdog.conf"),
     ):
-        if ini.exists():
+        try:
+            exists = ini.exists()
+        except OSError:
+            continue
+        if exists:
             cfg = _cp.ConfigParser()
             cfg.read(str(ini))
             for raw in cfg.get("network", "extra_ports", fallback="").split(","):

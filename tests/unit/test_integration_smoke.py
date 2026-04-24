@@ -66,6 +66,8 @@ def test_main_handlers_present() -> None:
         "geolist",
         "metrics-update",
         "knockd",
+        "doctor",
+        "safe-apply",
     }
     missing = expected - set(mod._HANDLERS.keys())
     assert not missing, f"Missing _HANDLERS keys: {missing}"

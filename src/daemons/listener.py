@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import configparser
 import hmac
-import ipaddress
 import json
 import os
 import pwd
@@ -101,19 +100,9 @@ def strip_ansi(text: str) -> str:
 
 
 def validate_ip(ip_str: str) -> bool:
-    """Return ``True`` if *ip_str* is a valid, non-catastrophic IPv4/IPv6 address or CIDR.
-
-    Rejects prefix length 0 (/0) in addition to structural invalidity.
-    A /0 would block the entire internet in a single command — never permit it
-    regardless of how valid it looks to the ``ipaddress`` module.
-    """
-    try:
-        net = ipaddress.ip_network(ip_str.strip(), strict=False)
-        if net.prefixlen == 0:
-            return False        # 0.0.0.0/0 or ::/0 — catastrophic all-block
-        return True
-    except ValueError:
-        return False
+    """Return ``True`` if *ip_str* is a structurally valid IPv4 address/CIDR."""
+    from utils.validation import validate_ipv4_network
+    return validate_ipv4_network(ip_str.strip()).ok
 
 
 # ── ChatOps capabilities whitelist ────────────────────────────────────────────
@@ -349,7 +338,11 @@ class KeybaseListener:
             print(f"[SECURITY] Too many arguments for {subcmd!r}: {args!r} — blocked", flush=True)
             return 1, f"Too many arguments supplied for {subcmd!r}"
 
-        cmd = ["sudo", "python3", str(_MAIN_PY)] + list(args)
+        fw = "/usr/local/bin/fw"
+        if Path(fw).exists():
+            cmd = ["sudo", fw] + list(args)
+        else:
+            cmd = ["sudo", "python3", str(_MAIN_PY)] + list(args)
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             output = strip_ansi((r.stdout or r.stderr or "(no output)").strip())

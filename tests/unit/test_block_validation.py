@@ -9,12 +9,19 @@ def _make_args(ip):
     return types.SimpleNamespace(ip=ip)
 
 
-def test_block_accepts_slash_8(monkeypatch):
-    """Test that /8 (largest allowed) is accepted."""
+def test_block_accepts_public_slash_8(monkeypatch):
+    """Test that a public /8 (largest allowed) is accepted."""
     import core.state
-    monkeypatch.setattr(core.state, 'block_ip', lambda ip: True)
+    monkeypatch.setattr(core.state, 'block_ip', lambda ip, **_kw: True)
     from main import _cmd_block
-    _cmd_block(_make_args('10.0.0.0/8'))   # should not raise
+    _cmd_block(_make_args('11.0.0.0/8'))   # should not raise
+
+
+def test_block_rejects_private_never_block_range():
+    """Test that default never_block private ranges are rejected."""
+    from main import _cmd_block
+    with pytest.raises(SystemExit):
+        _cmd_block(_make_args('10.0.0.0/8'))
 
 
 def test_block_rejects_slash_7():

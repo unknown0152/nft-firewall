@@ -21,6 +21,7 @@ import configparser
 import ipaddress
 import json
 import logging
+import os
 import socket
 import struct
 import subprocess
@@ -169,6 +170,7 @@ class PortKnockDaemon:
             "nft", "--echo", "--json", "add", "rule", "ip", "firewall", "input",
             "ip", "saddr", ip, "tcp", "dport", str(self._ssh_port), "accept",
         ]
+        cmd = self._privileged_nft(cmd)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             raise RuntimeError(f"nft add rule failed: {r.stderr.strip()}")
@@ -181,6 +183,7 @@ class PortKnockDaemon:
     def _revoke_rule(self, handle: str) -> None:
         """Best-effort deletion of an nftables rule by handle."""
         cmd = ["nft", "delete", "rule", "ip", "firewall", "input", "handle", handle]
+        cmd = self._privileged_nft(cmd)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             self._log(f"WARN: revoke rule handle={handle} failed: {r.stderr.strip()}")
@@ -199,3 +202,12 @@ class PortKnockDaemon:
 
     def _log(self, msg: str) -> None:
         print(f"[knockd] {msg}", flush=True)
+
+    def _privileged_nft(self, cmd: List[str]) -> List[str]:
+        """Route nft mutations through the installed sudo wrapper when needed."""
+        if os.geteuid() == 0:
+            return cmd
+        wrapper = Path("/usr/local/lib/nft-firewall/fw-nft")
+        if wrapper.exists():
+            return ["sudo", str(wrapper)] + cmd[1:]
+        return ["sudo"] + cmd

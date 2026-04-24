@@ -84,6 +84,7 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
     """
     from core.profiles import get_profile
     from core.rules import RulesetConfig
+    from core import state
 
     profile = get_profile(profile_name)
 
@@ -101,6 +102,8 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
     torrent_raw = cfg.get("network", "torrent_port", fallback="").strip()
     torrent_port: Optional[int] = _parse_int(torrent_raw, "torrent_port") if torrent_raw else None
 
+    dynamic_sets = state.merge_live_sets_into_persistent()
+
     return RulesetConfig(
         phy_if             = phy_if,
         vpn_interface      = cfg.get("network", "vpn_interface",      fallback="wg0"),
@@ -114,6 +117,9 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
         cosmos_tcp         = list(profile.cosmos_tcp),
         cosmos_udp         = list(profile.cosmos_udp),
         allow_plex_lan     = profile.allow_plex_lan,
+        blocked_ips        = dynamic_sets.get(state.SET_BLOCKED, []),
+        trusted_ips        = dynamic_sets.get(state.SET_TRUSTED, []),
+        dk_ips             = dynamic_sets.get(state.SET_DK, []),
     )
 
 
@@ -149,6 +155,36 @@ def _parse_int(value: str, key: str) -> int:
         return int(value)
     except ValueError:
         raise ValueError(f"Config key '{key}' has non-integer value: {value!r}")
+
+
+def _never_block_from_config(cfg: configparser.ConfigParser) -> List[str]:
+    """Return configured never-block CIDRs, always including the LAN subnet."""
+    from utils.validation import parse_never_block
+
+    raw = cfg.get("safety", "never_block", fallback="")
+    guards = parse_never_block(raw)
+    lan_net = cfg.get("network", "lan_net", fallback="").strip()
+    if lan_net:
+        try:
+            guards.extend(parse_never_block([lan_net]))
+        except ValueError:
+            pass
+    return sorted(set(guards))
+
+
+def _reapply_geoblocks() -> None:
+    """Best-effort geoblock reapply after a full ruleset reload."""
+    try:
+        _gcfg = _load_config()
+        _geo_countries = [c.strip() for c in
+                          _gcfg.get("geoblock", "blocked_countries", fallback="").split()
+                          if c.strip()]
+        if _geo_countries:
+            from integrations.geoblock import reblock_from_config
+            reblock_from_config(_geo_countries)
+    except Exception as _ge:
+        print(f"[warn] geoblock reblock_from_config failed (non-fatal): {_ge}",
+              file=sys.stderr)
 
 
 # ── Command handlers ──────────────────────────────────────────────────────────
@@ -213,19 +249,7 @@ def _cmd_apply(args: argparse.Namespace) -> None:
         if confirmed:
             print("[ok] CONFIRMED — new rules are now permanent.")
             _write_watchdog_markers(ruleset_cfg)
-            # Re-apply geo-blocks after a full ruleset reload
-            try:
-                import configparser as _cp
-                _gcfg = _load_config()
-                _geo_countries = [c.strip() for c in
-                                  _gcfg.get("geoblock", "blocked_countries", fallback="").split()
-                                  if c.strip()]
-                if _geo_countries:
-                    from integrations.geoblock import reblock_from_config
-                    reblock_from_config(_geo_countries)
-            except Exception as _ge:
-                print(f"[warn] geoblock reblock_from_config failed (non-fatal): {_ge}",
-                      file=sys.stderr)
+            _reapply_geoblocks()
         else:
             print("[warn] Not confirmed — rolling back ...", file=sys.stderr)
             if backup_path is not None:
@@ -238,19 +262,14 @@ def _cmd_apply(args: argparse.Namespace) -> None:
                 _die("No backup path available — manual intervention required.")
     else:
         _write_watchdog_markers(ruleset_cfg)
-        # Re-apply geo-blocks after a full ruleset reload
-        try:
-            import configparser as _cp
-            _gcfg = _load_config()
-            _geo_countries = [c.strip() for c in
-                              _gcfg.get("geoblock", "blocked_countries", fallback="").split()
-                              if c.strip()]
-            if _geo_countries:
-                from integrations.geoblock import reblock_from_config
-                reblock_from_config(_geo_countries)
-        except Exception as _ge:
-            print(f"[warn] geoblock reblock_from_config failed (non-fatal): {_ge}",
-                  file=sys.stderr)
+        _reapply_geoblocks()
+
+
+def _cmd_safe_apply(args: argparse.Namespace) -> None:
+    """safe-apply <profile> — apply with mandatory rollback confirmation."""
+    args.safe = True
+    args.dry_run = False
+    _cmd_apply(args)
 
 
 def _cmd_simulate(args: argparse.Namespace) -> None:
@@ -291,23 +310,16 @@ def _cmd_restore(args: argparse.Namespace) -> None:
 
 
 def _cmd_block(args: argparse.Namespace) -> None:
-    import ipaddress
-    try:
-        net = ipaddress.ip_network(args.ip, strict=False)
-    except ValueError:
-        _die(f"Invalid IP/CIDR: {args.ip!r}")
-    # Reject supernets that would silently black-hole all traffic.
-    # blocked_ips carries `flags interval` so nft accepts these without error.
-    if net.num_addresses > 2 ** 24:   # larger than a /8 — almost certainly a mistake
-        _die(
-            f"Refusing to block {args.ip} — prefix covers {net.num_addresses:,} addresses. "
-            f"Use a more specific CIDR (/{net.prefixlen} ≥ /8 required)."
-        )
+    from utils.validation import validate_block_target
+    cfg = _load_config()
+    result = validate_block_target(args.ip, never_block=_never_block_from_config(cfg))
+    if not result.ok:
+        _die(result.reason)
     from core.state import block_ip
-    if block_ip(args.ip):
-        print(f"[ok] Blocked {args.ip}")
+    if block_ip(result.value, never_block=_never_block_from_config(cfg)):
+        print(f"[ok] Blocked {result.value}")
     else:
-        _die(f"Failed to block {args.ip} — is the ruleset loaded?")
+        _die(f"Failed to block {result.value} — is the ruleset loaded?")
 
 
 def _cmd_unblock(args: argparse.Namespace) -> None:
@@ -378,11 +390,15 @@ def _cmd_knockd(args: argparse.Namespace) -> None:
 
 
 def _cmd_allow(args: argparse.Namespace) -> None:
+    from utils.validation import validate_trusted_target
+    result = validate_trusted_target(args.ip)
+    if not result.ok:
+        _die(result.reason)
     from core.state import allow_ip
-    if allow_ip(args.ip):
-        print(f"[ok] Trusted {args.ip} (SSH override)")
+    if allow_ip(result.value):
+        print(f"[ok] Trusted {result.value} (SSH override)")
     else:
-        _die(f"Failed to add {args.ip} — is the ruleset loaded?")
+        _die(f"Failed to add {result.value} — is the ruleset loaded?")
 
 
 def _cmd_disallow(args: argparse.Namespace) -> None:
@@ -465,6 +481,87 @@ def _cmd_rules(_args: argparse.Namespace) -> None:
         print(result.stdout)
     else:
         _die(f"nft list ruleset failed: {result.stderr.strip()}")
+
+
+def _cmd_doctor(args: argparse.Namespace) -> None:
+    """doctor — non-mutating safety checks for config and generated ruleset."""
+    from core.rules import generate_ruleset
+    from core import state
+    from integrations.docker import load_registry
+
+    nft_wrapper = Path("/usr/local/lib/nft-firewall/fw-nft")
+    profile = getattr(args, "profile", None)
+    cfg = _load_config()
+    if not profile:
+        profile = cfg.get("install", "profile", fallback="cosmos-vpn-secure")
+
+    checks: list[tuple[str, str, str]] = []
+
+    try:
+        ruleset_cfg = _build_ruleset_config(cfg, profile)
+        checks.append(("config", "ok", f"profile={profile} phy_if={ruleset_cfg.phy_if} vpn={ruleset_cfg.vpn_interface}"))
+    except (KeyError, ValueError, SystemExit) as exc:
+        checks.append(("config", "fail", str(exc)))
+        ruleset_cfg = None
+
+    if ruleset_cfg is not None:
+        exposed = load_registry()
+        ruleset = generate_ruleset(ruleset_cfg, exposed_ports=exposed)
+        if os.geteuid() == 0:
+            ok, err = state.simulate_apply(ruleset)
+            checks.append(("nft --check", "ok" if ok else "fail",
+                           "ruleset syntax valid" if ok else err))
+        elif nft_wrapper.exists():
+            ok, err = state.simulate_apply(ruleset, nft_cmd=["sudo", str(nft_wrapper)])
+            if ok:
+                checks.append(("nft --check", "ok", "ruleset syntax valid"))
+            elif _nft_check_permission_error(err):
+                checks.append((
+                    "nft --check",
+                    "warn",
+                    "nft --check requires installed sudo wrapper; "
+                    "run setup.py install or run doctor as root",
+                ))
+            else:
+                checks.append(("nft --check", "fail", err))
+        else:
+            checks.append((
+                "nft --check",
+                "warn",
+                "nft --check requires installed sudo wrapper; "
+                "run setup.py install or run doctor as root",
+            ))
+        checks.append(("killswitch marker",
+                       "ok" if 'oifname "' + ruleset_cfg.vpn_interface + '" accept' in ruleset else "fail",
+                       "OUTPUT VPN accept present"))
+        checks.append(("ipv6 blackout",
+                       "ok" if "table ip6 killswitch" in ruleset and "priority -300" in ruleset else "fail",
+                       "ip6 killswitch priority -300 present"))
+
+    persisted = state.load_persistent_sets()
+    total = sum(len(v) for v in persisted.values())
+    checks.append(("dynamic sets", "ok", f"{total} persisted member(s) across {len(persisted)} set(s)"))
+
+    failed = False
+    for name, status, detail in checks:
+        label = f"[{status}]"
+        print(f"{label} {name}: {detail}")
+        failed = failed or status == "fail"
+    sys.exit(1 if failed else 0)
+
+
+def _nft_check_permission_error(message: str) -> bool:
+    """Return True when nft --check failed because it was not privileged."""
+    lowered = (message or "").lower()
+    needles = (
+        "operation not permitted",
+        "a password is required",
+        "a terminal is required",
+        "not in the sudoers",
+        "may not run sudo",
+        "permission denied",
+    )
+    return any(needle in lowered for needle in needles)
 
 
 def _cmd_health(_args: argparse.Namespace) -> None:
@@ -601,8 +698,8 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog          = """
 Quick-start workflow:
   1.  Edit config/firewall.ini  — set [network] phy_if, vpn_server_ip, etc.
-  2.  python3 src/main.py simulate cosmos-vpn-secure
-  3.  sudo python3 src/main.py apply cosmos-vpn-secure
+  2.  fw doctor cosmos-vpn-secure
+  3.  sudo fw safe-apply cosmos-vpn-secure
   4.  sudo python3 src/main.py backup
   5.  sudo python3 src/main.py watchdog daemon
         """.strip(),
@@ -621,6 +718,12 @@ Quick-start workflow:
 
     sp = sub.add_parser("simulate",  help="Validate a profile with nft --check (no apply, no root needed)")
     sp.add_argument("profile",       help="Profile name (see 'profiles' command)")
+
+    sap = sub.add_parser("safe-apply", help="Apply with nft --check and timed rollback confirmation")
+    sap.add_argument("profile",       help="Profile name (see 'profiles' command)")
+
+    dp = sub.add_parser("doctor", help="Run non-mutating safety checks")
+    dp.add_argument("profile", nargs="?", help="Profile name (default: [install] profile)")
 
     # ── State ─────────────────────────────────────────────────────────────────
     sub.add_parser("backup",         help="Snapshot the current live ruleset to state/")
@@ -715,7 +818,9 @@ Quick-start workflow:
 
 _HANDLERS = {
     "apply"           : _cmd_apply,
+    "safe-apply"      : _cmd_safe_apply,
     "simulate"        : _cmd_simulate,
+    "doctor"          : _cmd_doctor,
     "backup"          : _cmd_backup,
     "restore"         : _cmd_restore,
     "block"           : _cmd_block,
