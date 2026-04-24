@@ -1,4 +1,13 @@
-# NFT Firewall
+# 🔥 NFT Firewall
+
+![Linux](https://img.shields.io/badge/Linux-Debian%2012%20%7C%2013-blue)
+![Firewall](https://img.shields.io/badge/Firewall-nftables-green)
+![VPN](https://img.shields.io/badge/VPN-WireGuard-purple)
+![Docker](https://img.shields.io/badge/Docker-iptables%20disabled-blue)
+![Cosmos](https://img.shields.io/badge/Cosmos%20Cloud-hardened-orange)
+![Status](https://img.shields.io/badge/status-stable-brightgreen)
+![Release](https://img.shields.io/github/v/release/unknown0152/nft-firewall?include_prereleases&label=release)
+![License](https://img.shields.io/github/license/unknown0152/nft-firewall)
 
 Secure-by-default nftables firewall for Debian servers with WireGuard, Docker, and optional Cosmos Cloud hardening.
 
