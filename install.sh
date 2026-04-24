@@ -6,9 +6,46 @@ echo "[+] NFT Firewall + Cosmos Installer"
 COSMOS_HTTP_PORT="${COSMOS_HTTP_PORT:-80}"
 COSMOS_HTTPS_PORT="${COSMOS_HTTPS_PORT:-443}"
 
-if [[ "${EUID}" -ne 0 ]]; then
-  echo "[ERROR] Run with sudo: sudo ./install.sh"
+detect_user() {
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    echo "$SUDO_USER"
+    return
+  fi
+
+  if logname >/dev/null 2>&1; then
+    local u
+    u="$(logname)"
+    if [[ "$u" != "root" ]]; then
+      echo "$u"
+      return
+    fi
+  fi
+
+  awk -F: '$3>=1000 && $1!="nobody"{print $1; exit}' /etc/passwd
+}
+
+echo "[+] Checking sudo / user setup..."
+
+if [[ "$EUID" -ne 0 ]]; then
+  echo "[ERROR] Run this installer as root or with sudo:"
+  echo "  sudo ./install.sh"
   exit 1
+fi
+
+if ! command -v sudo >/dev/null 2>&1; then
+  echo "[+] Installing sudo..."
+  apt-get update
+  apt-get install -y sudo
+fi
+
+TARGET_USER="$(detect_user || true)"
+
+if [[ -n "$TARGET_USER" ]]; then
+  echo "[+] Ensuring $TARGET_USER is in sudo group..."
+  usermod -aG sudo "$TARGET_USER" || true
+  echo "[!] $TARGET_USER may need to log out/in or reboot for sudo group changes to apply."
+else
+  echo "[!] No normal non-root user detected — skipping sudo group setup."
 fi
 
 cosmos_installed() {
