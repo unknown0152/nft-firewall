@@ -25,6 +25,7 @@ The returned string can be passed directly to ``state.apply_ruleset()``.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -53,6 +54,8 @@ class RulesetConfig:
     container_supernet:
         Docker container IP supernet (covers all bridge /28 networks).
         Default ``"172.16.0.0/12"``.
+    docker_networks:
+        Docker bridge network CIDRs treated as internal container networks.
     ssh_port:
         SSH port to protect with LAN + GeoIP restrictions.  Default ``22``.
     torrent_port:
@@ -63,6 +66,10 @@ class RulesetConfig:
         TCP ports used by Cosmos (``--network host``, no DNAT needed).
     cosmos_udp:
         UDP ports used by Cosmos Constellation VPN.
+        This project does not enable Cosmos VPN; keep empty unless explicitly
+        implementing unrelated custom UDP exposure.
+    cosmos_public_ports:
+        TCP ports exposed for Cosmos Cloud reverse-proxy ingress.
     allow_plex_lan:
         When ``True``, open port 32400 for LAN-only Plex direct play.
     blocked_ips/trusted_ips/dk_ips:
@@ -78,6 +85,7 @@ class RulesetConfig:
     vpn_server_port:    str           = ""
     lan_net:            str           = "192.168.1.0/24"
     container_supernet: str           = "172.16.0.0/12"
+    docker_networks:    List[str]     = field(default_factory=list)
 
     # WireGuard fwmark — wg-quick marks its encrypted UDP packets with this value
     # so the kernel routing policy can exempt them from the tunnel (avoiding loops).
@@ -93,6 +101,7 @@ class RulesetConfig:
     # Profile flags
     cosmos_tcp:     List[int] = field(default_factory=list)
     cosmos_udp:     List[int] = field(default_factory=list)
+    cosmos_public_ports: List[int] = field(default_factory=list)
     allow_plex_lan: bool      = False
 
     # Persisted dynamic sets
@@ -125,6 +134,30 @@ def _pset(ports) -> str:
     return "{ " + ", ".join(str(p) for p in sorted(ports)) + " }"
 
 
+def _normalize_intervals(elements: List[str]) -> List[str]:
+    """Return sorted non-overlapping CIDR/IP intervals for nft interval sets."""
+    networks = []
+    passthrough = []
+    for element in elements:
+        raw = str(element).strip()
+        if not raw:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(raw, strict=False))
+        except ValueError:
+            passthrough.append(raw)
+    collapsed = [str(net) for net in ipaddress.collapse_addresses(networks)]
+    return sorted(set(collapsed + passthrough))
+
+
+def _nexpr(networks: List[str]) -> str:
+    """Format one or more CIDRs as an nftables network expression."""
+    unique = _normalize_intervals(networks)
+    if len(unique) == 1:
+        return unique[0]
+    return "{ " + ", ".join(unique) + " }"
+
+
 def _emit_dynamic_set(lines: List[str], name: str, comment: str, elements: List[str]) -> None:
     """Append an interval ipv4_addr set with optional persisted elements."""
     a = lines.append
@@ -132,9 +165,18 @@ def _emit_dynamic_set(lines: List[str], name: str, comment: str, elements: List[
     a(f"    set {name} {{")
     a("        type ipv4_addr; flags interval")
     if elements:
-        a("        elements = { " + ", ".join(sorted(set(elements))) + " }")
+        a("        elements = { " + ", ".join(_normalize_intervals(elements)) + " }")
     a("    }")
     a("")
+
+
+def _allowed_exposed_ports(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[Dict]:
+    """Return exposed entries whose host port is explicitly allowed by config."""
+    allowed_tcp = set(cfg.cosmos_public_ports)
+    return [
+        e for e in exposed_ports
+        if e.get("proto", "tcp") == "tcp" and int(e["host_port"]) in allowed_tcp
+    ]
 
 
 def _build_header(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]:
@@ -162,6 +204,10 @@ def _build_header(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]:
         a(f"# Cosmos-UDP: {', '.join(map(str, cfg.cosmos_udp))}")
     a(f"# Plex      : {'yes' if cfg.allow_plex_lan else 'no'}")
     a(f"# Container supernet: {cfg.container_supernet}")
+    docker_nets = _normalize_intervals(cfg.docker_networks or [cfg.container_supernet])
+    a(f"# Docker networks: {', '.join(docker_nets)}")
+    if cfg.cosmos_public_ports:
+        a(f"# Cosmos public TCP: {', '.join(map(str, cfg.cosmos_public_ports))}")
     a(f"# Exposed ports ({len(exposed_ports)}):")
     for e in exposed_ports:
         a(f"#   host:{e['host_port']}/{e.get('proto', 'tcp')} "
@@ -201,9 +247,8 @@ def _build_nat_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]
     """Return the ``table ip nat`` block (prerouting DNAT + postrouting masquerade)."""
     iv = _iface_vars(cfg)
     OVPN = iv["OVPN"]
-
-    exp_tcp = [e for e in exposed_ports if e.get("proto", "tcp") == "tcp"]
-    exp_udp = [e for e in exposed_ports if e.get("proto", "tcp") == "udp"]
+    docker_nets = cfg.docker_networks or [cfg.container_supernet]
+    allowed_exposed = _allowed_exposed_ports(cfg, exposed_ports)
 
     L: List[str] = []
     a = L.append
@@ -218,10 +263,10 @@ def _build_nat_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]
     a("        type nat hook prerouting priority dstnat; policy accept;")
     a("")
 
-    if exposed_ports:
-        a("        # Published container ports — src-restricted entries only DNAT")
-        a("        # matching source IPs (e.g. Plex LAN-only).")
-        for e in exposed_ports:
+    if allowed_exposed:
+        a("        # Explicitly allowed public container ingress only.")
+        a("        # Docker published ports are ignored unless listed in firewall config.")
+        for e in allowed_exposed:
             hp  = e["host_port"]
             cip = e["container_ip"]
             cp  = e["container_port"]
@@ -234,7 +279,7 @@ def _build_nat_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]
                 a(f"        {pr} dport {hp} dnat to {cip}:{cp}"
                   f"   # host:{hp} -> {cip}:{cp}")
     else:
-        a("        # No ports currently exposed.")
+        a("        # No explicitly allowed public container ingress.")
 
     a("    }")
     a("")
@@ -243,7 +288,7 @@ def _build_nat_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]
     a("")
     a("        # Single supernet rule replaces 40+ Docker per-/28 rules.")
     a("        # Masquerade ONLY via wg0 — containers cannot leak via phy.")
-    a(f"        ip saddr {cfg.container_supernet} {OVPN} masquerade")
+    a(f"        ip saddr {_nexpr(docker_nets)} {OVPN} masquerade")
     a("    }")
     a("")
     a("}")
@@ -269,13 +314,16 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     for p in cfg.extra_ports:
         vpn_tcp_in.add(p)
 
-    exp_tcp_ports = sorted({e["host_port"] for e in exposed_ports
+    allowed_exposed = _allowed_exposed_ports(cfg, exposed_ports)
+
+    exp_tcp_ports = sorted({e["host_port"] for e in allowed_exposed
                             if e.get("proto", "tcp") == "tcp"})
-    exp_udp_ports = sorted({e["host_port"] for e in exposed_ports
+    exp_udp_ports = sorted({e["host_port"] for e in allowed_exposed
                             if e.get("proto", "tcp") == "udp"})
-    lan_only_hp   = {e["host_port"] for e in exposed_ports if e.get("src")}
+    lan_only_hp   = {e["host_port"] for e in allowed_exposed if e.get("src")}
     open_tcp      = [p for p in exp_tcp_ports if p not in lan_only_hp]
     open_udp      = [p for p in exp_udp_ports if p not in lan_only_hp]
+    docker_nets   = cfg.docker_networks or [cfg.container_supernet]
 
     L: List[str] = []
     a = L.append
@@ -303,6 +351,12 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
         "dk_ips",
         "DK GeoIP set — SSH allowed from Danish IPs.",
         cfg.dk_ips,
+    )
+    _emit_dynamic_set(
+        L,
+        "docker_nets",
+        "Docker bridge networks — internal container networks.",
+        docker_nets,
     )
     a("    # Bogon set — RFC-1918 ranges for anti-spoofing.")
     a("    set bogons {")
@@ -358,13 +412,18 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a("")
 
     if cfg.cosmos_tcp or cfg.cosmos_udp:
-        a("        # Cosmos host-bound ports (--network host, no DNAT needed)")
+        a("        # Legacy host-bound Cosmos ports (--network host, no DNAT needed)")
         if cfg.cosmos_tcp:
             a(f"        tcp dport {_pset(cfg.cosmos_tcp)} accept"
               "   # Cosmos reverse proxy")
         if cfg.cosmos_udp:
             a(f"        udp dport {_pset(cfg.cosmos_udp)} accept"
-              "   # Cosmos Constellation VPN")
+              "   # Legacy UDP exposure")
+        a("")
+
+    if cfg.cosmos_public_ports:
+        a("        # Cosmos Cloud reverse-proxy ingress (configured public TCP ports)")
+        a(f"        {PHY} tcp dport {_pset(cfg.cosmos_public_ports)} accept")
         a("")
 
     if cfg.allow_plex_lan:
@@ -401,7 +460,7 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a(f"    #      WG bootstrap — fwmark-locked: only the WireGuard kernel process")
     a(f"    #      marks packets with {cfg.vpn_fwmark}; no other process can use this hole.")
     a(f"    #   4. {OPH} ip daddr {cfg.lan_net}     (LAN stays local)")
-    a(f"    #   5. meta oifkind \"bridge\" ip daddr {cfg.container_supernet}  (host → containers via bridge only)")
+    a("    #   5. meta oifkind \"bridge\" ip daddr @docker_nets  (host → containers via bridge only)")
     a(f"    #   6. oifname \"{cfg.vpn_interface}\"   (THE KILLSWITCH — sole internet path)")
     a("    # wg0 down → rule 6 never matches → total drop, no leak.")
     a("    # No ct established,related: stale conntrack cannot bypass the killswitch.")
@@ -418,7 +477,7 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a("")
     a(f"        {OPH} meta mark {cfg.vpn_fwmark} ip daddr {cfg.vpn_server_ip} udp dport {cfg.vpn_server_port} accept  # WG bootstrap — fwmark-locked")
     a(f"        {OPH} ip daddr {cfg.lan_net} accept                         # LAN stays local")
-    a(f'        meta oifkind "bridge" ip daddr {cfg.container_supernet} accept'
+    a('        meta oifkind "bridge" ip daddr @docker_nets accept'
       "               # host → containers via bridge only")
     a(f"        {OVPN} accept                                        # KILLSWITCH")
     a("")
@@ -448,7 +507,7 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a(f"        # must be allowed through for inbound container services (e.g. Plex).")
     a(f"        # Without ct state new: reply packets from 172.16.x.x → enp88s0")
     a(f"        # are dropped before the ct established rule can accept them.")
-    a(f"        ip saddr {cfg.container_supernet} {OPH} ct state new drop"
+    a(f"        ip saddr @docker_nets {OPH} ct state new drop"
       "  # containers cannot initiate PHY connections")
     a("")
     a("        ct state established,related accept")
@@ -456,16 +515,22 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a(f"        {PHY} {OPH} ip saddr {cfg.lan_net} ip daddr {cfg.lan_net} accept"
       "  # LAN-to-LAN")
     a("")
-    a("        # Inter-container bridge traffic (Cosmos link networks).")
-    a("        # Positive bridge-kind match — immune to new interfaces being added.")
-    a('        meta iifkind "bridge" meta oifkind "bridge" accept')
+    a("        # Docker internal bridge traffic only between known container networks.")
+    a('        meta iifkind "bridge" meta oifkind "bridge" '
+      "ip saddr @docker_nets ip daddr @docker_nets accept")
     a("")
-    a(f"        {OVPN} accept  # container internet ONLY via VPN (killswitch)")
+    a(f"        ip saddr @docker_nets {OVPN} accept  # container internet ONLY via VPN (killswitch)")
     a("")
 
-    if exposed_ports:
+    if cfg.cosmos_public_ports:
+        a("        # Cosmos Cloud public reverse-proxy forwarding.")
+        a(f"        {PHY} tcp dport {_pset(cfg.cosmos_public_ports)} "
+          "ip daddr @docker_nets accept")
+        a("")
+
+    if allowed_exposed:
         a("        # Inbound to published containers (post-DNAT forwarding)")
-        for e in exposed_ports:
+        for e in allowed_exposed:
             cip = e["container_ip"]
             cp  = e["container_port"]
             pr  = e.get("proto", "tcp")

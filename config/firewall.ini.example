@@ -55,6 +55,15 @@ torrent_port    = REDACTED_SECRET
 never_block     = 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12
 
 # -----------------------------------------------------------------------------
+# [cosmos] — Cosmos Cloud reverse-proxy compatibility
+# This is for Cosmos Cloud's Docker gateway/reverse proxy model only.
+# Cosmos VPN is intentionally not enabled; UDP 4242 is not opened here.
+# -----------------------------------------------------------------------------
+[cosmos]
+enabled      = true
+public_ports = 80,443
+
+# -----------------------------------------------------------------------------
 # [keybase] — ChatOps bot identity
 # Alerts (AUTO-BANNED, VPN Down, SSH Login, etc.) are posted to this team/channel.
 # Two-way bot commands (!status, !block, !unblock, !ip-list, !top) are received

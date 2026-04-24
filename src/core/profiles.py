@@ -32,17 +32,21 @@ class Profile:
     ----------
     description:
         One-line human-readable description shown by ``profiles`` command.
+    cosmos_enabled:
+        Enable Cosmos Cloud reverse-proxy compatibility.  Public ports still
+        come from config and are never hardcoded by the profile.
     cosmos_tcp:
-        TCP ports used by Cosmos in ``--network host`` mode (no DNAT needed).
-        Opened unconditionally in INPUT.
+        Legacy host-bound Cosmos TCP ports. Prefer [cosmos] public_ports.
     cosmos_udp:
-        UDP ports used by Cosmos Constellation VPN.
+        Legacy UDP ports. Must remain empty for Cosmos Cloud; Cosmos VPN is
+        intentionally unsupported.
     allow_plex_lan:
         When ``True``, open port 32400 for LAN-only Plex direct play and
         drop it from all other sources.
     """
 
     description:    str
+    cosmos_enabled: bool      = False
     cosmos_tcp:     List[int] = field(default_factory=list)
     cosmos_udp:     List[int] = field(default_factory=list)
     allow_plex_lan: bool      = False
@@ -51,10 +55,18 @@ class Profile:
 # ── Profile registry ──────────────────────────────────────────────────────────
 
 PROFILES: Dict[str, Profile] = {
+    "cosmos-secure": Profile(
+        description    = "Cosmos Cloud reverse proxy + Docker networking + VPN killswitch",
+        cosmos_enabled = True,
+        cosmos_tcp     = [],
+        cosmos_udp     = [],
+        allow_plex_lan = False,
+    ),
     "cosmos-vpn-secure": Profile(
-        description    = "Cosmos Cloud + full-tunnel VPN killswitch",
-        cosmos_tcp     = [80, 443],
-        cosmos_udp     = [4242],
+        description    = "Legacy Cosmos name without Cosmos VPN; use [cosmos] public_ports",
+        cosmos_enabled = True,
+        cosmos_tcp     = [],
+        cosmos_udp     = [],
         allow_plex_lan = True,
     ),
     "vpn-only": Profile(
@@ -64,8 +76,9 @@ PROFILES: Dict[str, Profile] = {
         allow_plex_lan = False,
     ),
     "media-vpn": Profile(
-        description    = "Media stack + VPN killswitch + Cosmos proxy",
-        cosmos_tcp     = [80, 443],
+        description    = "Media stack + VPN killswitch; reverse proxy via [cosmos] public_ports",
+        cosmos_enabled = True,
+        cosmos_tcp     = [],
         cosmos_udp     = [],
         allow_plex_lan = True,
     ),

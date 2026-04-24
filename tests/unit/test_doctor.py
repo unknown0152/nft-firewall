@@ -25,6 +25,11 @@ def _patch_doctor_common(monkeypatch, ruleset=None):
     )
     monkeypatch.setattr(integrations.docker, "load_registry", lambda: [])
     monkeypatch.setattr(
+        integrations.docker,
+        "firewall_policy_status",
+        lambda: ("ok", "Docker iptables=false and ip6tables=false"),
+    )
+    monkeypatch.setattr(
         core.rules,
         "generate_ruleset",
         lambda _cfg, exposed_ports=None: ruleset

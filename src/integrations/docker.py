@@ -31,6 +31,7 @@ Expose registry::
 
 import ipaddress
 import json
+import shutil
 import subprocess
 import time
 from datetime import datetime
@@ -52,6 +53,39 @@ REQUIRED_DAEMON_KEYS: Dict[str, bool] = {
 
 _PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent.parent
 _BACKUP_DIR:   Path = _PROJECT_ROOT / "state"
+
+
+def firewall_policy_status(daemon_path: Path = DAEMON_JSON) -> tuple[str, str]:
+    """Return doctor status for Docker firewall/NAT authority.
+
+    Docker defaults to managing iptables when keys are absent.  nft-firewall
+    requires both iptables and ip6tables to be explicitly false so Docker
+    containers cannot publish public ports by themselves.
+    """
+    try:
+        if not daemon_path.exists():
+            return (
+                "warn",
+                f"{daemon_path} not found; Docker defaults may manage firewall rules",
+            )
+        data = json.loads(daemon_path.read_text())
+    except PermissionError:
+        return ("warn", f"cannot read {daemon_path}; run doctor as root to verify Docker firewall policy")
+    except json.JSONDecodeError as exc:
+        return ("warn", f"cannot parse {daemon_path}: {exc}")
+    except OSError as exc:
+        return ("warn", f"cannot read {daemon_path}: {exc}")
+
+    iptables = data.get("iptables", True)
+    ip6tables = data.get("ip6tables", True)
+    if iptables is False and ip6tables is False:
+        return ("ok", "Docker iptables=false and ip6tables=false")
+
+    return (
+        "fail",
+        "Docker can manage firewall rules; set iptables=false and ip6tables=false "
+        f"in {daemon_path} (current: iptables={iptables!r}, ip6tables={ip6tables!r})",
+    )
 
 
 # ── Daemon hardening ──────────────────────────────────────────────────────────
@@ -323,3 +357,65 @@ def list_exposed(path: Path = EXPOSE_CONF) -> List[Dict]:
         a source restriction was set.
     """
     return load_registry(path)
+
+
+def detect_bridge_networks(default_supernet: str = "172.16.0.0/12") -> List[str]:
+    """Return IPv4 CIDRs for Docker bridge networks, or a conservative fallback.
+
+    This is read-only: it calls Docker CLI inspection commands when Docker is
+    installed and reachable.  If Docker is absent, stopped, or not permitted for
+    the current user, the configured supernet is returned so the firewall keeps
+    the existing container killswitch coverage.
+    """
+    fallback = [default_supernet] if default_supernet else []
+    if shutil.which("docker") is None:
+        return fallback
+
+    try:
+        ids = subprocess.run(
+            ["docker", "network", "ls", "--filter", "driver=bridge", "--format", "{{.ID}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return fallback
+    if ids.returncode != 0:
+        return fallback
+
+    network_ids = [line.strip() for line in ids.stdout.splitlines() if line.strip()]
+    if not network_ids:
+        return fallback
+
+    try:
+        inspected = subprocess.run(
+            ["docker", "network", "inspect", *network_ids],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return fallback
+    if inspected.returncode != 0:
+        return fallback
+
+    try:
+        networks = json.loads(inspected.stdout)
+    except json.JSONDecodeError:
+        return fallback
+
+    cidrs = set(fallback)
+    for network in networks:
+        ipam = network.get("IPAM", {}) if isinstance(network, dict) else {}
+        for item in ipam.get("Config", []) or []:
+            subnet = item.get("Subnet", "")
+            if not subnet:
+                continue
+            try:
+                parsed = ipaddress.ip_network(subnet, strict=False)
+            except ValueError:
+                continue
+            if isinstance(parsed, ipaddress.IPv4Network):
+                cidrs.add(str(parsed))
+
+    return sorted(cidrs)

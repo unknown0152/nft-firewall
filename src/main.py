@@ -85,6 +85,7 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
     from core.profiles import get_profile
     from core.rules import RulesetConfig
     from core import state
+    from integrations.docker import detect_bridge_networks
 
     profile = get_profile(profile_name)
 
@@ -102,7 +103,20 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
     torrent_raw = cfg.get("network", "torrent_port", fallback="").strip()
     torrent_port: Optional[int] = _parse_int(torrent_raw, "torrent_port") if torrent_raw else None
 
+    cosmos_enabled = cfg.getboolean("cosmos", "enabled", fallback=profile.cosmos_enabled)
+    cosmos_ports_raw = cfg.get("cosmos", "public_ports", fallback="").strip()
+    cosmos_public_ports: List[int] = []
+    if cosmos_enabled and cosmos_ports_raw:
+        from utils.validation import validate_port
+        cosmos_public_ports = [
+            validate_port(p.strip(), "cosmos.public_ports")
+            for p in cosmos_ports_raw.replace(";", ",").split(",")
+            if p.strip()
+        ]
+
+    container_supernet = cfg.get("network", "container_supernet", fallback="172.16.0.0/12")
     dynamic_sets = state.merge_live_sets_into_persistent()
+    docker_networks = detect_bridge_networks(container_supernet)
 
     return RulesetConfig(
         phy_if             = phy_if,
@@ -110,12 +124,14 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
         vpn_server_ip      = cfg.get("network", "vpn_server_ip",      fallback=""),
         vpn_server_port    = cfg.get("network", "vpn_server_port",    fallback=""),
         lan_net            = cfg.get("network", "lan_net",            fallback="192.168.1.0/24"),
-        container_supernet = cfg.get("network", "container_supernet", fallback="172.16.0.0/12"),
+        container_supernet = container_supernet,
+        docker_networks    = docker_networks,
         ssh_port           = _parse_int(cfg.get("network", "ssh_port", fallback="22"), "ssh_port"),
         torrent_port       = torrent_port,
         extra_ports        = extra_ports,
         cosmos_tcp         = list(profile.cosmos_tcp),
         cosmos_udp         = list(profile.cosmos_udp),
+        cosmos_public_ports = cosmos_public_ports,
         allow_plex_lan     = profile.allow_plex_lan,
         blocked_ips        = dynamic_sets.get(state.SET_BLOCKED, []),
         trusted_ips        = dynamic_sets.get(state.SET_TRUSTED, []),
@@ -487,7 +503,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     """doctor — non-mutating safety checks for config and generated ruleset."""
     from core.rules import generate_ruleset
     from core import state
-    from integrations.docker import load_registry
+    from integrations.docker import firewall_policy_status, load_registry
 
     nft_wrapper = Path("/usr/local/lib/nft-firewall/fw-nft")
     profile = getattr(args, "profile", None)
@@ -507,6 +523,8 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     if ruleset_cfg is not None:
         exposed = load_registry()
         ruleset = generate_ruleset(ruleset_cfg, exposed_ports=exposed)
+        docker_status, docker_detail = firewall_policy_status()
+        checks.append(("docker firewall authority", docker_status, docker_detail))
         if os.geteuid() == 0:
             ok, err = state.simulate_apply(ruleset)
             checks.append(("nft --check", "ok" if ok else "fail",
