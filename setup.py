@@ -42,17 +42,25 @@ from typing import List, Optional, Tuple
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 
-SYSTEM_USER  = "fw-admin"
-INSTALL_DIR  = Path("/opt/nft-firewall")
-LOG_DIR      = Path("/var/log/nft-firewall")
-LIB_DIR      = Path("/var/lib/nft-firewall")
-ETC_DIR      = Path("/etc/nft-firewall")
-SUDOERS_FILE = Path("/etc/sudoers.d/nft-firewall")
-SYSTEMD_DST  = Path("/etc/systemd/system")
-SYSTEMD_SRC  = Path(__file__).resolve().parent / "systemd"
-PYTHON_BIN   = "/usr/bin/python3"
-FW_BIN       = Path("/usr/local/bin/fw")
-WRAPPER_DIR  = Path("/usr/local/lib/nft-firewall")
+SYSTEM_USER        = "fw-admin"
+LEGACY_SYSTEM_USER = "nft-firewall"
+ADMIN_USER         = "nuc"
+MEDIA_USER         = "media"
+BACKUP_USER        = "backup"
+DEPLOY_USER        = "deploy"
+INSTALL_DIR        = Path("/opt/nft-firewall")
+LOG_DIR            = Path("/var/log/nft-firewall")
+LIB_DIR            = Path("/var/lib/nft-firewall")
+ETC_DIR            = Path("/etc/nft-firewall")
+MEDIA_COMPOSE_DIR  = Path("/home/media/compose")
+COSMOS_COMPOSE_DIR = MEDIA_COMPOSE_DIR / "cosmos"
+SUDOERS_FILE       = Path("/etc/sudoers.d/nft-firewall")
+SYSTEMD_DST        = Path("/etc/systemd/system")
+SYSTEMD_SRC        = Path(__file__).resolve().parent / "systemd"
+PYTHON_BIN         = "/usr/bin/python3"
+FW_BIN             = Path("/usr/local/bin/fw")
+WRAPPER_DIR        = Path("/usr/local/lib/nft-firewall")
+FIREWALL_DIRS      = (INSTALL_DIR, LIB_DIR, LOG_DIR, ETC_DIR)
 
 # Long-running daemons (restarted on every install)
 ACTIVE_SERVICES = ["nft-watchdog", "nft-listener", "nft-ssh-alert"]
@@ -80,6 +88,113 @@ def _run(cmd: List[str], check: bool = True, **kw) -> subprocess.CompletedProces
 def _require_root() -> None:
     if os.geteuid() != 0:
         _die("Must run as root:  sudo python3 setup.py install")
+
+
+def _user_exists(name: str) -> bool:
+    try:
+        pwd.getpwnam(name)
+        return True
+    except KeyError:
+        return False
+
+
+def _group_exists(name: str) -> bool:
+    try:
+        grp.getgrnam(name)
+        return True
+    except KeyError:
+        return False
+
+
+def _ensure_group(name: str) -> None:
+    if _group_exists(name):
+        return
+    r = _run(["groupadd", name], check=False)
+    if r.returncode != 0:
+        _die(f"groupadd {name} failed: {r.stderr.strip()}")
+    _ok(f"Created group '{name}'")
+
+
+def _user_in_group(user: str, group: str) -> bool:
+    try:
+        return user in grp.getgrnam(group).gr_mem
+    except KeyError:
+        return False
+
+
+def _ensure_supplementary_group(user: str, group: str) -> None:
+    if not _user_exists(user):
+        _warn(f"User '{user}' not found — cannot add to group '{group}'")
+        return
+    _ensure_group(group)
+    if _user_in_group(user, group):
+        _ok(f"'{user}' is already in group '{group}'")
+        return
+    r = _run(["usermod", "--append", "--groups", group, user], check=False)
+    if r.returncode != 0:
+        _die(f"usermod -aG {group} {user} failed: {r.stderr.strip()}")
+    _ok(f"Added '{user}' to group '{group}'")
+
+
+def _remove_supplementary_group(user: str, group: str) -> None:
+    if not _user_exists(user) or not _group_exists(group):
+        return
+    if not _user_in_group(user, group):
+        return
+    r = _run(["gpasswd", "--delete", user, group], check=False)
+    if r.returncode == 0:
+        _ok(f"Removed '{user}' from group '{group}'")
+    else:
+        _warn(f"Could not remove '{user}' from group '{group}': {r.stderr.strip()}")
+
+
+def _ensure_user(name: str, *, system: bool, home: Optional[Path], shell: str) -> None:
+    if _user_exists(name):
+        pw = pwd.getpwnam(name)
+        _ok(f"User '{name}' already exists (uid={pw.pw_uid}, shell={pw.pw_shell})")
+        return
+
+    cmd = ["useradd", "--user-group", "--shell", shell]
+    if system:
+        cmd += ["--system", "--no-create-home"]
+    else:
+        cmd += ["--create-home"]
+        if home is not None:
+            cmd += ["--home-dir", str(home)]
+    cmd.append(name)
+
+    _info(f"Creating user '{name}' ...")
+    r = _run(cmd, check=False)
+    if r.returncode != 0:
+        _die(f"useradd {name} failed: {r.stderr.strip()}")
+    _ok(f"Created user '{name}'")
+
+
+def _migrate_legacy_system_user() -> None:
+    """Rename a legacy nft-firewall runtime user to fw-admin when possible."""
+    if not _user_exists(LEGACY_SYSTEM_USER):
+        return
+    if _user_exists(SYSTEM_USER):
+        _warn(
+            f"Legacy user '{LEGACY_SYSTEM_USER}' still exists; '{SYSTEM_USER}' is already present. "
+            "It will not receive sudoers grants."
+        )
+        return
+
+    _info(f"Migrating legacy runtime user '{LEGACY_SYSTEM_USER}' → '{SYSTEM_USER}' ...")
+    r = _run(["usermod", "--login", SYSTEM_USER, LEGACY_SYSTEM_USER], check=False)
+    if r.returncode != 0:
+        _die(f"usermod --login {SYSTEM_USER} {LEGACY_SYSTEM_USER} failed: {r.stderr.strip()}")
+
+    if _group_exists(LEGACY_SYSTEM_USER) and not _group_exists(SYSTEM_USER):
+        r = _run(["groupmod", "--new-name", SYSTEM_USER, LEGACY_SYSTEM_USER], check=False)
+        if r.returncode != 0:
+            _die(f"groupmod --new-name {SYSTEM_USER} {LEGACY_SYSTEM_USER} failed: {r.stderr.strip()}")
+
+    r = _run(["usermod", "--shell", "/bin/false", SYSTEM_USER], check=False)
+    if r.returncode != 0:
+        _warn(f"Could not reset shell for '{SYSTEM_USER}': {r.stderr.strip()}")
+    _ok(f"Migrated '{LEGACY_SYSTEM_USER}' to '{SYSTEM_USER}'")
 
 
 # ── Step 0: Interactive configuration wizard ──────────────────────────────────
@@ -346,31 +461,30 @@ def step0_configure(reconfigure: bool = False) -> None:
 # ── Step 1: System user ───────────────────────────────────────────────────────
 
 def step1_create_system_user() -> None:
-    """Create fw-admin as a no-login system account, add to 'adm' group."""
-    _header("Step 1 — System User")
+    """Create and normalize the nft-firewall host user model."""
+    _header("Step 1 — User Model")
 
-    try:
-        pw = pwd.getpwnam(SYSTEM_USER)
-        _ok(f"User '{SYSTEM_USER}' already exists (uid={pw.pw_uid}, shell={pw.pw_shell})")
-    except KeyError:
-        _info(f"Creating system user '{SYSTEM_USER}' ...")
-        r = _run(
-            ["useradd", "--system", "--no-create-home",
-             "--shell", "/bin/false", SYSTEM_USER],
-            check=False,
-        )
-        if r.returncode != 0:
-            _die(f"useradd failed: {r.stderr.strip()}")
-        _ok(f"Created system user '{SYSTEM_USER}' (uid={pwd.getpwnam(SYSTEM_USER).pw_uid})")
+    _migrate_legacy_system_user()
+    _ensure_user(SYSTEM_USER, system=True, home=None, shell="/bin/false")
+    _ensure_user(MEDIA_USER, system=False, home=Path("/home/media"), shell="/bin/bash")
+    _ensure_user(BACKUP_USER, system=False, home=Path("/home/backup"), shell="/bin/bash")
+    _ensure_user(DEPLOY_USER, system=False, home=Path("/home/deploy"), shell="/bin/bash")
 
     # 'adm' group membership lets fw-admin read /var/log/auth.log (ssh-alert)
     try:
         grp.getgrnam("adm")
-        r = _run(["usermod", "--append", "--groups", "adm", SYSTEM_USER], check=False)
-        if r.returncode == 0:
-            _ok(f"'{SYSTEM_USER}' is in group 'adm' (auth.log read access)")
+        _ensure_supplementary_group(SYSTEM_USER, "adm")
     except KeyError:
         _warn("Group 'adm' not found — ssh-alert may not be able to read auth.log")
+
+    _ensure_group("docker")
+    _ensure_supplementary_group(MEDIA_USER, "docker")
+    if _user_exists(ADMIN_USER):
+        _ensure_supplementary_group(ADMIN_USER, "docker")
+    else:
+        _warn(f"Admin user '{ADMIN_USER}' not found — skipping docker group convenience")
+    _remove_supplementary_group(SYSTEM_USER, "docker")
+    _ok(f"'{SYSTEM_USER}' is not granted Docker group access")
 
 
 # ── Step 2: Install code ──────────────────────────────────────────────────────
@@ -380,6 +494,7 @@ def step2_install_code() -> None:
     _header("Step 2 — Install Code to /opt/nft-firewall")
 
     project_root = Path(__file__).resolve().parent
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
 
     src_dir = project_root / "src"
     if not src_dir.is_dir():
@@ -424,16 +539,20 @@ def step2_install_code() -> None:
 # ── Step 3: Directories & ownership ──────────────────────────────────────────
 
 def step3_scaffold_dirs() -> None:
-    """Create runtime directories and chown everything to fw-admin:fw-admin."""
+    """Create runtime directories and apply firewall/media ownership."""
     _header("Step 3 — Scaffold Directories & Ownership")
 
-    for d in (INSTALL_DIR, LOG_DIR, LIB_DIR, ETC_DIR):
+    for d in FIREWALL_DIRS:
         d.mkdir(parents=True, exist_ok=True)
         _ok(f"Ensured {d}")
 
-    for d in (INSTALL_DIR, LOG_DIR, LIB_DIR, ETC_DIR):
+    for d in FIREWALL_DIRS:
         _run(["chown", "-R", f"{SYSTEM_USER}:{SYSTEM_USER}", str(d)])
         _ok(f"chown -R {SYSTEM_USER}:{SYSTEM_USER}  {d}")
+
+    COSMOS_COMPOSE_DIR.mkdir(parents=True, exist_ok=True)
+    _run(["chown", "-R", f"{MEDIA_USER}:{MEDIA_USER}", str(MEDIA_COMPOSE_DIR)])
+    _ok(f"chown -R {MEDIA_USER}:{MEDIA_USER}  {MEDIA_COMPOSE_DIR}")
 
 
 # ── Step 4: Sudoers ───────────────────────────────────────────────────────────
@@ -669,8 +788,9 @@ def _patch_unit(content: str) -> str:
     return "".join(out_lines)
 
 
-# Units that must keep User=root — skip the User= substitution for these.
-_ROOT_UNITS = {"nft-daily-report.service"}
+# Units that must keep User=root — none by default.  The firewall runtime
+# model is fw-admin plus least-privilege sudo wrappers.
+_ROOT_UNITS: set[str] = set()
 
 
 def step5_deploy_services() -> None:
@@ -767,9 +887,22 @@ def cmd_install(reconfigure: bool = False) -> None:
     print("\033[32m\033[1m  Install complete.\033[0m")
     print(f"    Code        : {INSTALL_DIR}")
     print(f"    Running as  : {SYSTEM_USER}")
+    print(f"    Compose     : {COSMOS_COMPOSE_DIR}  (run as {MEDIA_USER})")
     print(f"    Logs        : journalctl -u nft-watchdog -f")
     print(f"    Sudoers     : {SUDOERS_FILE}")
     print(f"    Apply rules : sudo fw doctor && sudo fw safe-apply <profile>")
+    print()
+    print("  User model:")
+    print(f"    {ADMIN_USER:<8} human admin/dev user; copy and edit nft-firewall code as this user")
+    print(f"    {SYSTEM_USER:<8} nft-firewall runtime/systemd user; no Docker group access")
+    print(f"    {MEDIA_USER:<8} Docker/Cosmos/compose runtime user; compose lives under {COSMOS_COMPOSE_DIR}")
+    print(f"    {BACKUP_USER:<8} backup user")
+    print(f"    {DEPLOY_USER:<8} rsync/deploy user")
+    print()
+    print("  Typical workflow:")
+    print(f"    1. As {ADMIN_USER}: copy or git-clone this repo")
+    print("    2. Install firewall: sudo python3 setup.py install")
+    print(f"    3. Run Cosmos compose as {MEDIA_USER} from {COSMOS_COMPOSE_DIR}")
 
 
 def cmd_status() -> None:
@@ -785,11 +918,15 @@ def cmd_status() -> None:
         _warn(f"User '{SYSTEM_USER}' does not exist")
 
     # Directories
-    for d in (INSTALL_DIR, LOG_DIR, LIB_DIR, ETC_DIR):
+    for d in FIREWALL_DIRS:
         if d.exists():
             _ok(f"{d}")
         else:
             _warn(f"{d}  MISSING")
+    if COSMOS_COMPOSE_DIR.exists():
+        _ok(f"{COSMOS_COMPOSE_DIR}")
+    else:
+        _warn(f"{COSMOS_COMPOSE_DIR}  MISSING")
 
     # Sudoers
     if SUDOERS_FILE.exists():

@@ -202,6 +202,7 @@ Description=NFT Firewall doctor check
 
 [Service]
 Type=oneshot
+User=fw-admin
 ExecStart=/usr/local/bin/fw doctor
 EOF
 
@@ -224,6 +225,7 @@ Description=NFT Firewall threat feed update
 
 [Service]
 Type=oneshot
+User=fw-admin
 ExecStart=/usr/local/bin/fw threatfeed update
 EOF
 

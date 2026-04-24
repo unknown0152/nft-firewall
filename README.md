@@ -165,36 +165,53 @@ statistics in `!top` and the daily dashboard.
 
 ## 3. Installation on a New Server
 
-### Step 1 — Copy the project
+### Step 1 — Prepare users and copy the project
 
 ```bash
-# On the OLD server — create a portable archive
-sudo bash /home/fw-admin/nft-firewall/backup_firewall.sh
+# Optional base user bootstrap on the NEW server
+sudo bash setup.sh
 
-# Transfer to the new server
-scp /home/fw-admin/backups/nft-firewall-*.tar.gz user@NEW_SERVER:/tmp/
+# Copy or clone nft-firewall as the human admin/dev user
+sudo -u nuc git clone <repo-url> /home/nuc/nft-firewall
+cd /home/nuc/nft-firewall
 
-# On the NEW server — extract
-sudo mkdir -p /home/fw-admin
-sudo tar -xzf /tmp/nft-firewall-*.tar.gz -C /home/fw-admin/
+# Or, from an old server, create and transfer a portable archive as nuc
+sudo -u nuc bash /home/nuc/nft-firewall/backup_firewall.sh
+scp /home/nuc/backups/nft-firewall-*.tar.gz user@NEW_SERVER:/tmp/
 ```
 
-### Step 2 — Run the setup wizard
+### Step 2 — Install the firewall
 
 ```bash
-sudo python3 /home/fw-admin/nft-firewall/setup.py
+cd /home/nuc/nft-firewall
+sudo python3 setup.py install
 ```
 
-The wizard runs four phases automatically:
+The installer keeps a strict user model:
 
-| Phase | What happens |
+| User | Purpose |
 |---|---|
-| **1 — Detect** | Reads your interfaces, `/etc/wireguard/wg0.conf`, and `/etc/ssh/sshd_config` to auto-fill all network values.  Skips `wg*`, `docker*`, and `veth*` interfaces. |
-| **2 — Review** | Displays a table with ✓ green / ? yellow / ✗ red for each detected value — confirm or correct, then enter Keybase settings |
-| **3 — Simulate** | Writes `config/firewall.ini` and validates the generated ruleset with `nft --check` before touching anything live |
-| **4 — Apply** | Installs missing apt packages, applies the ruleset, installs service files, starts all three daemons, shows a live status panel |
+| `nuc` | Human admin/dev user; owns the working copy and may be in `docker` for convenience |
+| `fw-admin` | nft-firewall runtime/systemd user; owns `/opt/nft-firewall`, `/var/lib/nft-firewall`, `/var/log/nft-firewall`, and `/etc/nft-firewall`; not in `docker` |
+| `media` | Docker/Cosmos/compose runtime user; owns `/home/media/compose` |
+| `backup` | Backup user |
+| `deploy` | rsync/deploy user |
 
-### Step 3 — Enable the daily report timer
+The installer writes least-privilege sudo wrappers for `fw-admin`. It does
+not grant broad wildcard sudo and does not put `fw-admin` in the Docker group.
+
+### Step 3 — Run Cosmos compose as media
+
+```bash
+sudo -u media mkdir -p /home/media/compose/cosmos
+cd /home/media/compose/cosmos
+sudo -u media docker compose up -d
+```
+
+Cosmos/Docker files belong under `/home/media/compose/cosmos`, not under
+`/home/nuc` and not under `/opt/nft-firewall`.
+
+### Step 4 — Enable the daily report timer
 
 ```bash
 sudo systemctl enable --now nft-daily-report.timer
@@ -563,7 +580,7 @@ sudo journalctl -u nft-daily-report -n 50
 
 ```bash
 sudo bash backup_firewall.sh
-# → /home/fw-admin/backups/nft-firewall-YYYY-MM-DD_HHMMSS.tar.gz
+# → /home/nuc/backups/nft-firewall-YYYY-MM-DD_HHMMSS.tar.gz
 ```
 
 The archive excludes `.git`, `__pycache__`, `state/`, `.backups/`, and `dist/`.

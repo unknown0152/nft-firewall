@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=root
+User=fw-admin
 WorkingDirectory=/opt/nft-firewall
 ExecStart=/usr/bin/python3 /opt/nft-firewall/src/main.py metrics-update
 Environment=PYTHONPATH=/opt/nft-firewall/src

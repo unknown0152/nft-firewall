@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=fw-admin
 WorkingDirectory=/opt/nft-firewall
 ExecStart=/usr/bin/python3 /opt/nft-firewall/src/main.py knockd daemon
 Restart=always

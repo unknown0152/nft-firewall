@@ -54,7 +54,7 @@ def test_passes_when_root(monkeypatch):
 - [ ] **Step 2: Run to confirm failure**
 
 ```bash
-cd /home/fw-admin/nft-firewall
+cd /home/nuc/nft-firewall
 python3 -m pytest tests/test_setup.py::test_exits_when_not_root -v
 ```
 Expected: `ModuleNotFoundError: No module named 'setup'`
@@ -127,7 +127,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to confirm they pass**
 
 ```bash
-cd /home/fw-admin/nft-firewall
+cd /home/nuc/nft-firewall
 python3 -m pytest tests/test_setup.py -v
 ```
 Expected: 2 PASSED
@@ -1209,7 +1209,7 @@ git commit -m "feat(setup): main() wiring + full test suite — setup wizard com
 After all tasks complete, run the full test suite one final time:
 
 ```bash
-cd /home/fw-admin/nft-firewall
+cd /home/nuc/nft-firewall
 python3 -m pytest tests/test_setup.py -v --tb=short
 ```
 
