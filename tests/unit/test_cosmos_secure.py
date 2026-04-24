@@ -32,7 +32,8 @@ def test_cosmos_secure_profile_does_not_open_cosmos_vpn_port():
 def test_cosmos_public_ports_are_configurable():
     ruleset = _rules([8080])
 
-    assert 'iifname "eth0" tcp dport { 8080 } accept' in ruleset
+    assert 'iifname "wg0" tcp dport { 8080 } accept' in ruleset
+    assert 'iifname "eth0" tcp dport { 8080 } accept' not in ruleset
     assert "tcp dport { 80, 443 }" not in ruleset
 
 
@@ -41,8 +42,16 @@ def test_docker_forwarding_is_limited_to_configured_public_ports():
 
     assert "set docker_nets" in ruleset
     assert "elements = { 172.18.0.0/15 }" in ruleset
-    assert 'iifname "eth0" tcp dport { 80, 443 } ip daddr @docker_nets accept' in ruleset
+    assert 'iifname "wg0" tcp dport { 80, 443 } ip daddr @docker_nets accept' in ruleset
+    assert 'iifname "eth0" tcp dport { 80, 443 } ip daddr @docker_nets accept' not in ruleset
     assert 'meta iifkind "bridge" meta oifkind "bridge" accept' not in ruleset
+
+
+def test_public_ports_only_allowed_on_wg0():
+    ruleset = _rules([80, 443])
+
+    assert 'iifname "wg0" tcp dport { 80, 443 } accept' in ruleset
+    assert 'iifname "eth0" tcp dport { 80, 443 } accept' not in ruleset
 
 
 def test_overlapping_docker_networks_are_collapsed_for_interval_set():
@@ -119,8 +128,10 @@ def test_published_container_port_is_allowed_when_listed_in_firewall_config():
     }]
     ruleset = generate_ruleset(cfg, exposed_ports=exposed)
 
-    assert "tcp dport 8080 dnat to 172.18.0.5:80" in ruleset
-    assert "tcp dport 80 ip daddr 172.18.0.5 accept" in ruleset
+    assert 'iifname "wg0" tcp dport 8080 dnat to 172.18.0.5:80' in ruleset
+    assert 'iifname "eth0" tcp dport 8080 dnat to 172.18.0.5:80' not in ruleset
+    assert 'iifname "wg0" tcp dport 80 ip daddr 172.18.0.5 accept' in ruleset
+    assert 'iifname "eth0" tcp dport 80 ip daddr 172.18.0.5 accept' not in ruleset
 
 
 def test_container_killswitch_remains_enforced_for_forwarding():

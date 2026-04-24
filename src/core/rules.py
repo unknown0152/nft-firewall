@@ -246,6 +246,7 @@ def _build_ipv6_killswitch() -> List[str]:
 def _build_nat_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]:
     """Return the ``table ip nat`` block (prerouting DNAT + postrouting masquerade)."""
     iv = _iface_vars(cfg)
+    VPN = iv["VPN"]
     OVPN = iv["OVPN"]
     docker_nets = cfg.docker_networks or [cfg.container_supernet]
     allowed_exposed = _allowed_exposed_ports(cfg, exposed_ports)
@@ -273,10 +274,10 @@ def _build_nat_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]
             pr  = e.get("proto", "tcp")
             src = e.get("src")
             if src:
-                a(f"        {pr} dport {hp} ip saddr {src} dnat to {cip}:{cp}"
+                a(f"        {VPN} {pr} dport {hp} ip saddr {src} dnat to {cip}:{cp}"
                   f"   # host:{hp} LAN-only -> {cip}:{cp}")
             else:
-                a(f"        {pr} dport {hp} dnat to {cip}:{cp}"
+                a(f"        {VPN} {pr} dport {hp} dnat to {cip}:{cp}"
                   f"   # host:{hp} -> {cip}:{cp}")
     else:
         a("        # No explicitly allowed public container ingress.")
@@ -316,13 +317,6 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
 
     allowed_exposed = _allowed_exposed_ports(cfg, exposed_ports)
 
-    exp_tcp_ports = sorted({e["host_port"] for e in allowed_exposed
-                            if e.get("proto", "tcp") == "tcp"})
-    exp_udp_ports = sorted({e["host_port"] for e in allowed_exposed
-                            if e.get("proto", "tcp") == "udp"})
-    lan_only_hp   = {e["host_port"] for e in allowed_exposed if e.get("src")}
-    open_tcp      = [p for p in exp_tcp_ports if p not in lan_only_hp]
-    open_udp      = [p for p in exp_udp_ports if p not in lan_only_hp]
     docker_nets   = cfg.docker_networks or [cfg.container_supernet]
 
     L: List[str] = []
@@ -423,7 +417,7 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
 
     if cfg.cosmos_public_ports:
         a("        # Cosmos Cloud reverse-proxy ingress (configured public TCP ports)")
-        a(f"        {PHY} tcp dport {_pset(cfg.cosmos_public_ports)} accept")
+        a(f"        {VPN} tcp dport {_pset(cfg.cosmos_public_ports)} accept")
         a("")
 
     if cfg.allow_plex_lan:
@@ -436,14 +430,6 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
 
     a(f"        {PHY} ip saddr {cfg.lan_net} accept   # general LAN access (last positive rule)")
     a("")
-
-    if open_tcp or open_udp:
-        a("        # Published container ports (no src restriction)")
-        if open_tcp:
-            a(f"        tcp dport {_pset(open_tcp)} accept")
-        if open_udp:
-            a(f"        udp dport {_pset(open_udp)} accept")
-        a("")
 
     a('        counter log prefix "[nft-in-drop] " flags all limit rate 5/minute')
     a("    }")
@@ -524,7 +510,7 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
 
     if cfg.cosmos_public_ports:
         a("        # Cosmos Cloud public reverse-proxy forwarding.")
-        a(f"        {PHY} tcp dport {_pset(cfg.cosmos_public_ports)} "
+        a(f"        {VPN} tcp dport {_pset(cfg.cosmos_public_ports)} "
           "ip daddr @docker_nets accept")
         a("")
 
@@ -536,10 +522,10 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
             pr  = e.get("proto", "tcp")
             src = e.get("src")
             if src:
-                a(f"        ip saddr {src} {pr} dport {cp} ip daddr {cip} accept"
+                a(f"        {VPN} ip saddr {src} {pr} dport {cp} ip daddr {cip} accept"
                   f"   # {e['host_port']}/{pr} [LAN-only] -> {cip}:{cp}")
             else:
-                a(f"        {pr} dport {cp} ip daddr {cip} accept"
+                a(f"        {VPN} {pr} dport {cp} ip daddr {cip} accept"
                   f"   # {e['host_port']}/{pr} -> {cip}:{cp}")
         a("")
 
