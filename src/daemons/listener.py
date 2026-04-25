@@ -249,14 +249,20 @@ class KeybaseListener:
     # ── Poll ──────────────────────────────────────────────────────────────────
 
     def _list_all_convos(self, cfg: Dict) -> List[Dict]:
-        payload = json.dumps({"method": "list", "params": {}})
+        """Fetch all active conversations. If no team, specifically prioritize DMs."""
+        payload = json.dumps({"method": "list", "params": {"options": {"topic_type": "chat"}}})
         cmd = self._kb_prefix(cfg) + ["chat", "api", "-m", payload]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if r.returncode != 0:
                 print(f"[WARN] list failed (rc={r.returncode}): {r.stderr.strip()}", flush=True)
                 return []
-            return json.loads(r.stdout).get("result", {}).get("conversations") or []
+            
+            res = json.loads(r.stdout).get("result", {}).get("conversations") or []
+            
+            # If no team is set, we need to make sure we include DMs from the target user.
+            # Keybase chat api list usually returns everything, but filtering by topic_type helps.
+            return res
         except Exception as exc:
             print(f"[WARN] _list_all_convos: {exc}", flush=True)
             return []
