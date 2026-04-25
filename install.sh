@@ -121,6 +121,19 @@ fi
 
 echo "[+] Applying Cosmos least-privilege hardening..."
 
+# Fix Cosmos start.sh pathing (must cd to /opt/cosmos)
+if [[ -f /opt/cosmos/start.sh ]]; then
+  echo "[+] Fixing Cosmos start.sh pathing..."
+  cat > /opt/cosmos/start.sh <<'EOF'
+#!/bin/bash
+cd /opt/cosmos
+chmod +x cosmos
+chmod +x cosmos-launcher
+./cosmos-launcher && ./cosmos
+EOF
+  chmod +x /opt/cosmos/start.sh
+fi
+
 id media >/dev/null 2>&1 || useradd -m -s /bin/bash media
 
 if getent group docker >/dev/null 2>&1; then
@@ -152,6 +165,16 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStartPre=/usr/local/bin/fix-cosmos-perms
 EOF
+
+echo "[+] Ensuring Docker firewall authority is disabled..."
+mkdir -p /etc/docker
+if [[ ! -f /etc/docker/daemon.json ]]; then
+  echo '{"iptables": false, "ip6tables": false}' > /etc/docker/daemon.json
+  systemctl restart docker || true
+fi
+
+echo "[+] Enabling nftables service..."
+systemctl enable --now nftables || true
 
 echo "[+] Reloading systemd..."
 systemctl daemon-reload
