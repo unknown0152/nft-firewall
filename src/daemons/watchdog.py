@@ -518,7 +518,7 @@ class NftWatchdog:
             ``(False, reason)`` if a marker is missing from ``nft list ruleset``.
         """
         if not self._markers:
-            return True, "markers not loaded; nft integrity check skipped"
+            return False, "markers not loaded; cannot verify killswitch integrity"
 
         ok, out, _ = self._run(["nft", "list", "ruleset"])
         if not ok:
@@ -534,6 +534,23 @@ class NftWatchdog:
                 return False, f"missing: ip6 killswitch table '{ip6_table}'"
 
         return True, ""
+
+    def _validate_conf_markers(self, content: str) -> bool:
+        """Return True only if *content* contains structural killswitch markers."""
+        if not content.strip():
+            return False
+        required = ["table ip6 killswitch", "policy drop"]
+        for pattern in required:
+            if pattern not in content:
+                return False
+        if self._markers:
+            output_rule = str(self._markers.get("output_rule", "")).strip()
+            ip6_table = str(self._markers.get("ip6_table", "")).strip()
+            if output_rule and output_rule not in content:
+                return False
+            if ip6_table and f"table ip6 {ip6_table}" not in content:
+                return False
+        return True
 
     # ── Endpoint IP cache ─────────────────────────────────────────────────────
 
@@ -979,11 +996,26 @@ class NftWatchdog:
                     self._log("ERROR", f"nftables killswitch check FAILED: {nft_what}")
                     stall_tracker = None
 
-                    # ── Auto-repair: reload from saved /etc/nftables.conf ─────
-                    self._log("INFO", "Attempting auto-repair: nft -f /etc/nftables.conf")
-                    repair_ok, _, repair_err = self._run(
-                        ["nft", "-f", "/etc/nftables.conf"], timeout=15,
+                    # ── Auto-repair: validate then reload /etc/nftables.conf ──
+                    conf_path = "/etc/nftables.conf"
+                    self._log("INFO", f"Attempting auto-repair: nft -f {conf_path}")
+                    check_ok, _, check_err = self._run(
+                        ["nft", "--check", "--file", conf_path], timeout=15,
                     )
+                    try:
+                        conf_content = open(conf_path).read()
+                    except OSError:
+                        conf_content = ""
+                    conf_valid = check_ok and self._validate_conf_markers(conf_content)
+                    if not conf_valid:
+                        self._log("ERROR",
+                                  f"Auto-repair aborted: {conf_path} failed validation")
+                        repair_ok = False
+                        repair_err = check_err or "marker validation failed"
+                    else:
+                        repair_ok, _, repair_err = self._run(
+                            ["nft", "-f", conf_path], timeout=15,
+                        )
                     if repair_ok:
                         self._log("INFO",
                                   "Killswitch rules restored from /etc/nftables.conf ✓")

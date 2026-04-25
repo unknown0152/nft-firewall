@@ -54,7 +54,6 @@ SET_TRUSTED: str  = "trusted_ips"
 SET_DK:      str  = "dk_ips"
 TABLE:       str  = "ip firewall"
 
-_TMP_APPLY: Path = Path("/tmp/_nft_apply.conf")
 _SETS_STATE_FILE: Path = Path("/var/lib/nft-firewall/dynamic-sets.json")
 _KNOWN_SETS: tuple[str, ...] = (SET_BLOCKED, SET_TRUSTED, SET_DK)
 
@@ -128,11 +127,16 @@ def apply_ruleset(ruleset: str) -> None:
         If ``nft`` exits with a non-zero return code.  The error message
         includes nft's stderr output.
     """
-    _TMP_APPLY.write_text(ruleset)
-    _TMP_APPLY.chmod(0o600)
+    tmp: Optional[Path] = None
     try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False, prefix="nft_apply_"
+        ) as fh:
+            fh.write(ruleset)
+            tmp = Path(fh.name)
+        tmp.chmod(0o600)
         result = subprocess.run(
-            ["nft", "--file", str(_TMP_APPLY)],
+            ["nft", "--file", str(tmp)],
             capture_output=True,
             text=True,
         )
@@ -142,7 +146,8 @@ def apply_ruleset(ruleset: str) -> None:
             )
         print("[state] Ruleset applied atomically")
     finally:
-        _TMP_APPLY.unlink(missing_ok=True)
+        if tmp and tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def save_conf(ruleset: str, path: Path = NFT_CONF) -> None:

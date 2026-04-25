@@ -146,12 +146,12 @@ class TestNftablesIntegrity:
             ok, reason = wd._check_nftables_integrity("wg0")
         assert not ok
 
-    def test_no_markers_loaded_skips_check(self):
+    def test_no_markers_loaded_fails_closed(self):
         wd = _wd()
         wd._markers = None
-        # Should return True and skip the nft call entirely
-        ok, _ = wd._check_nftables_integrity("wg0")
-        assert ok
+        ok, reason = wd._check_nftables_integrity("wg0")
+        assert not ok
+        assert "markers not loaded" in reason
 
 
 # ── _attempt_recovery ─────────────────────────────────────────────────────────
@@ -221,3 +221,58 @@ class TestAttemptRecovery:
         # _wait_for_handshake should NOT have been called for level 1
         # (interface was absent), only for level 2
         assert wait_mock.call_count == 1
+
+
+# ── _validate_conf_markers ────────────────────────────────────────────────────
+
+class TestValidateConfMarkers:
+
+    def _wd(self, output_rule="nft-killswitch-output", ip6_table="fw6"):
+        wd = _wd()
+        wd._markers = {"output_rule": output_rule, "ip6_table": ip6_table}
+        return wd
+
+    def test_empty_content_returns_false(self):
+        wd = self._wd()
+        assert not wd._validate_conf_markers("")
+
+    def test_whitespace_only_returns_false(self):
+        wd = self._wd()
+        assert not wd._validate_conf_markers("   \n  ")
+
+    def test_missing_ip6_killswitch_table_returns_false(self):
+        wd = self._wd()
+        content = "nft-killswitch-output\npolicy drop\n"
+        assert not wd._validate_conf_markers(content)
+
+    def test_missing_policy_drop_returns_false(self):
+        wd = self._wd()
+        content = "table ip6 killswitch { }\nnft-killswitch-output\n"
+        assert not wd._validate_conf_markers(content)
+
+    def test_missing_output_rule_marker_returns_false(self):
+        wd = self._wd()
+        content = "table ip6 killswitch { }\npolicy drop\ntable ip6 fw6 { }\n"
+        assert not wd._validate_conf_markers(content)
+
+    def test_missing_ip6_table_marker_returns_false(self):
+        wd = self._wd()
+        content = "table ip6 killswitch { }\npolicy drop\nnft-killswitch-output\n"
+        assert not wd._validate_conf_markers(content)
+
+    def test_valid_content_returns_true(self):
+        wd = self._wd()
+        content = (
+            "table ip6 killswitch {\n"
+            "    chain output { type filter hook output priority filter; policy drop; }\n"
+            "}\n"
+            "table ip6 fw6 { }\n"
+            "nft-killswitch-output\n"
+        )
+        assert wd._validate_conf_markers(content)
+
+    def test_no_markers_requires_only_structural_patterns(self):
+        wd = _wd()
+        wd._markers = None
+        content = "table ip6 killswitch {\npolicy drop\n}\n"
+        assert wd._validate_conf_markers(content)
