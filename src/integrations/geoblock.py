@@ -98,12 +98,22 @@ def _apply_block_guard(cidr: str) -> bool:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def block_country(cc: str) -> "tuple[int, int]":
+def block_country(cc: str, force: bool = False) -> "tuple[int, int]":
     """Download and block all CIDRs for country *cc* using optimized aggregation."""
     import ipaddress
     from core.state import set_add_bulk, SET_BLOCKED
+    from utils.validation import get_connection_info
 
     cc = cc.upper()
+    
+    # ── SAFETY CHECK ──────────────────────────────────────────────────────────
+    if not force:
+        my_ip, my_cc = get_connection_info()
+        if cc == my_cc:
+            print(f"  \033[33m!\033[0m \033[1mBlocked Prevented:\033[0m {cc} is your current country.")
+            print(f"    To prevent lockout, you cannot block your own region ({my_ip}).")
+            return (0, 0)
+    
     print(f"  \033[34m→\033[0m Fetching CIDR list for {cc}...")
     cidrs = _fetch_country(cc)
     if not cidrs:

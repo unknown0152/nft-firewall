@@ -970,7 +970,7 @@ def _menu_live_logs() -> None:
 
 
 def _menu_geoblock(args: argparse.Namespace) -> None:
-    """Sub-menu for managing country blocks."""
+    """Sub-menu for managing country blocks with Cosmos-style safety."""
     from integrations.geoblock import block_country, unblock_country
     _debug_log("Geoblock manager opened")
     while True:
@@ -978,20 +978,28 @@ def _menu_geoblock(args: argparse.Namespace) -> None:
         print("  \033[1m🌍 Geo-Block Manager\033[0m")
         print("  \033[90m──────────────────────────────────\033[0m")
         _cmd_geolist(args)
-        print("\n  \033[34m1.\033[0m 🚫 Block a Country (e.g. CN, RU)")
-        print("  \033[34m2.\033[0m ✅ Unblock a Country")
+        print("\n  \033[34m1.\033[0m 🛡️  \033[1mBlock High-Risk Countries\033[0m (RU, CN, BR, IN, VN)")
+        print("  \033[34m2.\033[0m 🚫 Block a Specific Country (e.g. RU)")
+        print("  \033[34m3.\033[0m ✅ Unblock a Country")
         print("  \033[34m0.\033[0m ⬅️  Back to Main Menu")
         print()
         
         choice = _prompt_tty("  Select an option: ")
         if choice == "1":
+            print("\n  \033[34m→\033[0m Protecting your current connection...")
+            # We'll implement a safety check here later
+            for cc in ["RU", "CN", "BR", "IN", "VN"]:
+                _debug_log(f"Geoblock: Blocking high-risk {cc}")
+                block_country(cc)
+            _wait_for_any_key()
+        elif choice == "2":
             cc_input = _prompt_tty("\n  Enter Country Code(s) (e.g. CN RU): ").upper()
             if cc_input and cc_input != "Q":
                 for cc in cc_input.split():
                     _debug_log(f"Geoblock: Blocking country {cc}")
                     block_country(cc)
                 _wait_for_any_key()
-        elif choice == "2":
+        elif choice == "3":
             cc = _prompt_tty("\n  Enter Country Code to unblock: ").upper()
             if cc and cc != "Q":
                 _debug_log(f"Geoblock: Unblocking country {cc}")

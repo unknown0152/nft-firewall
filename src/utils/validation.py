@@ -115,6 +115,33 @@ def validate_block_target(
     return ValidationResult(True, str(net))
 
 
+def get_connection_info() -> Tuple[str, str]:
+    """Detect the current connecting IP and its country code using multiple APIs.
+    
+    Returns (ip, cc) or ("", "") on failure.
+    """
+    import urllib.request, json
+    
+    # Try multiple public APIs for redundancy
+    apis = [
+        "https://ipapi.co/json/",
+        "https://ifconfig.co/json",
+        "https://ip-api.com/json/"
+    ]
+    
+    for url in apis:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                ip = data.get("ip") or data.get("query") or ""
+                cc = data.get("country_code") or data.get("country") or ""
+                if ip and cc:
+                    return ip, cc.upper()
+        except Exception:
+            continue
+    return "", ""
+
+
 def validate_trusted_target(value: str) -> ValidationResult:
     """Validate an IP/CIDR that would be inserted into trusted_ips."""
     result = validate_ipv4_network(value)
