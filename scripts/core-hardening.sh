@@ -104,6 +104,7 @@ fi
 echo ""
 echo "[+] Finalizing verification..."
 if command -v fw >/dev/null 2>&1; then
-  # Use the just-installed fw to check status
-  fw doctor || true
+  # Fetch profile from config if possible
+  PROF=$(grep "profile =" /opt/nft-firewall/config/firewall.ini | cut -d'=' -f2 | xargs || echo "cosmos-vpn-secure")
+  fw doctor "$PROF" || true
 fi
