@@ -30,6 +30,6 @@ Use on a fresh Debian server first. Keep SSH console access available.
 ## One-command install
 
 ```bash
-wget -qO setup.sh https://raw.githubusercontent.com/unknown0152/nft-firewall/main/setup-new.sh && sudo bash setup.sh
+wget -qO setup.sh https://raw.githubusercontent.com/unknown0152/nft-firewall/main/setup.sh && sudo bash setup.sh
 ```
 
