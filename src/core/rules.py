@@ -539,7 +539,7 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a("        type filter hook output priority filter; policy drop;")
     a("")
     a("        # Atomic marker for watchdog/doctor integrity checks")
-    a('        counter comment "nft-killswitch-output" accept')
+    a('        counter accept comment "nft-killswitch-output"')
     a("")
     a('        oifname "lo" accept')
     a(f"        {OPH} udp sport 68 udp dport 67 accept                # DHCP client only (sport 68)")
