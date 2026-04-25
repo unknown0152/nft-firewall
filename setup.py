@@ -565,6 +565,63 @@ def step2_install_code() -> None:
         _ok(f"Installed fw wrapper -> {FW_BIN}")
 
 
+def step2_5_nft_preflight(src_path: Optional[Path] = None) -> None:
+    """Validate the generated ruleset with nft --check before touching systemd.
+
+    Uses the just-installed src so we test exactly what was deployed.
+    Exits with status 1 on any syntax error — stopping the install before
+    any systemd units are created or enabled.
+    """
+    _header("Step 2.5 — Validate Ruleset Syntax (nft --check)")
+
+    if not _CONF_FILE.exists():
+        _warn("firewall.ini not found — skipping nft --check pre-flight")
+        return
+
+    # Load the just-installed (or provided) core.rules to generate a real ruleset
+    import sys
+    sys.path.insert(0, str(src_path or (INSTALL_DIR / "src")))
+
+    try:
+        from core.rules import RulesetConfig, generate_ruleset
+    except ImportError as e:
+        _die(f"Could not import core.rules from {src_path or (INSTALL_DIR / 'src')}: {e}")
+
+    # Use a dummy profile for validation if firewall.ini exists
+    from configparser import ConfigParser
+    cp = ConfigParser()
+    cp.read(_CONF_FILE)
+    
+    # Minimal config to trigger ruleset generation
+    try:
+        cfg = RulesetConfig(
+            phy_if=cp.get("network", "phy_if", fallback="eth0"),
+            vpn_interface=cp.get("network", "vpn_interface", fallback="wg0"),
+            vpn_server_ip=cp.get("network", "vpn_server_ip", fallback="1.2.3.4"),
+            vpn_server_port=cp.get("network", "vpn_server_port", fallback="51820"),
+            lan_net=cp.get("network", "lan_net", fallback="192.168.1.0/24"),
+            ssh_port=cp.getint("network", "ssh_port", fallback=22),
+        )
+        ruleset = generate_ruleset(cfg)
+    except Exception as e:
+        _die(f"Failed to generate ruleset for pre-flight: {e}")
+
+    # Check syntax with nft --check
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".conf") as tmp:
+        tmp.write(ruleset)
+        tmp.flush()
+        
+        r = subprocess.run(["/usr/sbin/nft", "--check", "--file", tmp.name],
+                          capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"\033[31m\033[1m  NFT Syntax Error Detected!\033[0m")
+            print(r.stderr.strip())
+            print()
+            _die("Install aborted: Generated ruleset has syntax errors.")
+        
+    _ok("Ruleset syntax is valid (nft --check)")
+
+
 # ── Step 3: Directories & ownership ──────────────────────────────────────────
 
 def step3_scaffold_dirs() -> None:
@@ -907,6 +964,7 @@ def cmd_install(reconfigure: bool = False) -> None:
     step0_configure(reconfigure=reconfigure)
     step1_create_system_user()
     step2_install_code()
+    step2_5_nft_preflight()
     step3_scaffold_dirs()
     step4_install_sudoers()
     step5_deploy_services()
