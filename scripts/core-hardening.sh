@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# =============================================================================
+# scripts/core-hardening.sh — Secondary Installer Logic
+# =============================================================================
+# Handles Cosmos Cloud and Keybase installation/hardening.
+# =============================================================================
+set -euo pipefail
+
+cosmos_installed() {
+  [[ -s /etc/systemd/system/CosmosCloud.service ]] || [[ -x /opt/cosmos/start.sh ]]
+}
+
+echo "[+] Hardening Cosmos Cloud..."
+
+if cosmos_installed; then
+  echo "[+] Cosmos already installed — skipping full installer, applying security patches only"
+else
+  echo "[+] Downloading Cosmos installer..."
+  COSMOS_INSTALLER="$(mktemp /tmp/cosmos-get.XXXXXX.sh)"
+  curl -sfL https://cosmos-cloud.io/get.sh -o "$COSMOS_INSTALLER"
+  chmod +x "$COSMOS_INSTALLER"
+
+  echo "[+] Patching Cosmos installer to skip iptables..."
+  # Patch check_ports() to skip iptables as nft-firewall handles it
+  sed -i 's/check_ports() {/check_ports_orig() {/g' "$COSMOS_INSTALLER"
+  echo 'check_ports() { echo "[+] Skipping Cosmos iptables; nft-firewall active."; }' >> "$COSMOS_INSTALLER"
+  
+  export NO_DOCKER=1
+  bash "$COSMOS_INSTALLER"
+fi
+
+# 1. Fix start.sh pathing
+if [[ -f /opt/cosmos/start.sh ]]; then
+  echo "[+] Fixing Cosmos start.sh pathing..."
+  cat > /opt/cosmos/start.sh <<'EOF'
+#!/bin/bash
+cd /opt/cosmos
+chmod +x cosmos
+chmod +x cosmos-launcher
+./cosmos-launcher && ./cosmos
+EOF
+  chmod +x /opt/cosmos/start.sh
+fi
+
+# 2. Least-privilege user
+id media >/dev/null 2>&1 || useradd -m -s /bin/bash media
+if getent group docker >/dev/null 2>&1; then
+  usermod -aG docker media || true
+fi
+
+# 3. Permissions wrapper
+cat > /usr/local/bin/fix-cosmos-perms <<'EOF'
+#!/usr/bin/env bash
+set -e
+chown -R media:media /opt/cosmos /var/lib/cosmos 2>/dev/null || true
+chmod -R u+rwX /var/lib/cosmos 2>/dev/null || true
+EOF
+chmod +x /usr/local/bin/fix-cosmos-perms
+
+# 4. Systemd overrides
+mkdir -p /etc/systemd/system/CosmosCloud.service.d
+cat > /etc/systemd/system/CosmosCloud.service.d/override.conf <<'EOF'
+[Service]
+User=media
+Group=media
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStartPre=/usr/local/bin/fix-cosmos-perms
+EOF
+
+# 5. Docker configuration
+echo "[+] Ensuring Docker firewall authority is disabled..."
+mkdir -p /etc/docker
+if [[ ! -f /etc/docker/daemon.json ]]; then
+  echo '{"iptables": false, "ip6tables": false}' > /etc/docker/daemon.json
+  systemctl restart docker || true
+fi
+
+# 6. NFTables activation
+echo "[+] Activating nftables..."
+systemctl enable --now nftables || true
+systemctl daemon-reload
+
+if cosmos_installed; then
+  echo "[+] Restarting CosmosCloud with new security profile..."
+  systemctl restart CosmosCloud || true
+fi
+
+# 7. Keybase Optional setup
+echo "[+] Checking for Keybase ChatOps..."
+if ! command -v keybase >/dev/null 2>&1; then
+  read -p "  Would you like to install Keybase for ChatOps? [y/N]: " install_kb
+  if [[ "$install_kb" =~ ^[Yy]$ ]]; then
+    echo "[+] Downloading Keybase..."
+    curl -sfL https://prerelease.keybase.io/keybase_amd64.deb -o keybase_amd64.deb
+    echo "[+] Installing Keybase..."
+    apt-get update -qq && apt-get install -y ./keybase_amd64.deb >/dev/null
+    rm keybase_amd64.deb
+    echo "[!] Keybase installed. IMPORTANT: Run 'keybase login' after this script."
+  fi
+fi
+
+# Verification
+echo ""
+echo "[+] Finalizing verification..."
+if command -v fw >/dev/null 2>&1; then
+  # Use the just-installed fw to check status
+  fw doctor || true
+fi
