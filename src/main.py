@@ -810,6 +810,98 @@ def _cmd_watchdog(args: argparse.Namespace) -> None:
         _die(f"Unknown watchdog subcommand: {args.watchdog_cmd!r}")
 
 
+def _cmd_menu(_args: argparse.Namespace) -> None:
+    """Interactive TUI menu for MacOS-style ease of use."""
+    import subprocess
+    while True:
+        print("\033[2J\033[H", end="")
+        print("  \033[1m🔥 NFT Firewall Control Panel\033[0m")
+        print("  ──────────────────────────────────")
+        print("  \033[34m1.\033[0m 📊 View Status Dashboard")
+        print("  \033[34m2.\033[0m 🔒 Apply / Update Firewall Rules")
+        print("  \033[34m3.\033[0m 🚫 Block an IP Address")
+        print("  \033[34m4.\033[0m ✅ Unblock an IP Address")
+        print("  \033[34m5.\033[0m 📋 View Blocked & Trusted IPs")
+        print("  \033[34m0.\033[0m ❌ Exit")
+        print()
+        
+        try:
+            with open("/dev/tty", "r") as tty:
+                print("  Select an option [0-5]: ", end="", flush=True)
+                choice = tty.readline().strip()
+        except (KeyboardInterrupt, EOFError, OSError):
+            try:
+                choice = input("  Select an option [0-5]: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                break
+
+        if choice == "1":
+            print("\033[2J\033[H", end="")
+            subprocess.run(["sudo", "fw", "status"])
+            try:
+                with open("/dev/tty", "r") as tty:
+                    print("\n  Press Enter to return to menu...", end="", flush=True)
+                    tty.readline()
+            except OSError:
+                input("\n  Press Enter to return to menu...")
+        elif choice == "2":
+            print("\033[2J\033[H  Available profiles:\n")
+            subprocess.run(["fw", "profiles"])
+            try:
+                with open("/dev/tty", "r") as tty:
+                    print("\n  Enter profile name [cosmos-vpn-secure]: ", end="", flush=True)
+                    prof = tty.readline().strip() or "cosmos-vpn-secure"
+            except OSError:
+                prof = input("\n  Enter profile name [cosmos-vpn-secure]: ").strip() or "cosmos-vpn-secure"
+            subprocess.run(["sudo", "fw", "safe-apply", prof])
+            try:
+                with open("/dev/tty", "r") as tty:
+                    print("\n  Press Enter to return to menu...", end="", flush=True)
+                    tty.readline()
+            except OSError:
+                input("\n  Press Enter to return to menu...")
+        elif choice == "3":
+            try:
+                with open("/dev/tty", "r") as tty:
+                    print("\n  Enter IP/CIDR to block: ", end="", flush=True)
+                    ip = tty.readline().strip()
+            except OSError:
+                ip = input("\n  Enter IP/CIDR to block: ").strip()
+            if ip: subprocess.run(["sudo", "fw", "block", ip])
+            try:
+                with open("/dev/tty", "r") as tty:
+                    print("\n  Press Enter to return to menu...", end="", flush=True)
+                    tty.readline()
+            except OSError:
+                input("\n  Press Enter to return to menu...")
+        elif choice == "4":
+            try:
+                with open("/dev/tty", "r") as tty:
+                    print("\n  Enter IP/CIDR to unblock: ", end="", flush=True)
+                    ip = tty.readline().strip()
+            except OSError:
+                ip = input("\n  Enter IP/CIDR to unblock: ").strip()
+            if ip: subprocess.run(["sudo", "fw", "unblock", ip])
+            try:
+                with open("/dev/tty", "r") as tty:
+                    print("\n  Press Enter to return to menu...", end="", flush=True)
+                    tty.readline()
+            except OSError:
+                input("\n  Press Enter to return to menu...")
+        elif choice == "5":
+            print("\033[2J\033[H", end="")
+            subprocess.run(["sudo", "fw", "ip-list"])
+            try:
+                with open("/dev/tty", "r") as tty:
+                    print("\n  Press Enter to return to menu...", end="", flush=True)
+                    tty.readline()
+            except OSError:
+                input("\n  Press Enter to return to menu...")
+        elif choice == "0":
+            break
+
+
 # ── Parser construction ───────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -932,6 +1024,7 @@ Quick-start workflow:
     gup.add_argument("country_code", metavar="CC")
 
     sub.add_parser("geolist", help="Show blocked countries and CIDR counts")
+    sub.add_parser("menu",    help="Interactive TUI menu for easy management")
 
     return p
 
@@ -939,6 +1032,7 @@ Quick-start workflow:
 # ── Dispatch table ────────────────────────────────────────────────────────────
 
 _HANDLERS = {
+    "menu"            : _cmd_menu,
     "apply"           : _cmd_apply,
     "safe-apply"      : _cmd_safe_apply,
     "simulate"        : _cmd_simulate,

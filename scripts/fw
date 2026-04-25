@@ -15,7 +15,7 @@ fi
 
 cmd="${1:-}"
 case "$cmd" in
-  doctor|simulate|safe-apply|block|unblock|allow|disallow|ip-list|status|health|rules|profiles|threat-update|geoblock|geounblock|geolist|metrics-update)
+  menu|doctor|simulate|safe-apply|block|unblock|allow|disallow|ip-list|status|health|rules|profiles|threat-update|geoblock|geounblock|geolist|metrics-update)
     export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
     exec "$PYTHON_BIN" "$MAIN_PY" "$@"
     ;;
@@ -23,7 +23,12 @@ case "$cmd" in
     echo "fw: use 'fw safe-apply <profile>' for live changes" >&2
     exit 2
     ;;
-  ""|-h|--help|help)
+  "")
+    export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+    exec "$PYTHON_BIN" "$MAIN_PY" menu
+    ;;
+  -h|--help|help)
+    export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
     exec "$PYTHON_BIN" "$MAIN_PY" --help
     ;;
   *)
