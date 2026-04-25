@@ -810,96 +810,114 @@ def _cmd_watchdog(args: argparse.Namespace) -> None:
         _die(f"Unknown watchdog subcommand: {args.watchdog_cmd!r}")
 
 
+def _get_key() -> str:
+    """Capture a single keypress without requiring Enter."""
+    import sys, tty, termios
+    try:
+        with open("/dev/tty", "r") as tty_file:
+            fd = tty_file.fileno()
+            old_settings = termios.tcgetattr(fd)
+            try:
+                tty.setraw(fd)
+                ch = tty_file.read(1)
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            return ch
+    except Exception:
+        return sys.stdin.read(1)
+
+
 def _cmd_menu(_args: argparse.Namespace) -> None:
     """Interactive TUI menu for MacOS-style ease of use."""
     import subprocess
+    from daemons.watchdog import NftWatchdog
+    
     while True:
+        # Fetch status for header
+        wd = NftWatchdog(config_path=_config_path_for_daemon())
+        try:
+            h = wd.health()
+            status_str = f"🟢 \033[32mHEALTHY\033[0m" if h["status"] == "HEALTHY" else f"🔴 \033[31m{h['status']}\033[0m"
+            vpn_ip = h.get("vpn_ip", "none")
+            vpn_str = f"🟢 \033[32m{vpn_ip}\033[0m" if vpn_ip != "none" else "🔴 \033[31moffline\033[0m"
+        except Exception:
+            status_str = "❓ \033[90munknown\033[0m"
+            vpn_str = "❓ \033[90munknown\033[0m"
+
+        load = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
+
         print("\033[2J\033[H", end="")
         print("  \033[1m🔥 NFT Firewall Control Panel\033[0m")
-        print("  ──────────────────────────────────")
-        print("  \033[34m1.\033[0m 📊 View Status Dashboard")
-        print("  \033[34m2.\033[0m 🔒 Apply / Update Firewall Rules")
-        print("  \033[34m3.\033[0m 🚫 Block an IP Address")
-        print("  \033[34m4.\033[0m ✅ Unblock an IP Address")
-        print("  \033[34m5.\033[0m 📋 View Blocked & Trusted IPs")
-        print("  \033[34m0.\033[0m ❌ Exit")
+        print("  \033[90m──────────────────────────────────────────────────\033[0m")
+        print(f"  Status: {status_str:<18} |  VPN: {vpn_str}")
+        print(f"  Load:   \033[36m{load:.2f}\033[0m")
+        print("  \033[90m──────────────────────────────────────────────────\033[0m")
         print()
+        print("  \033[34m[ s ]\033[0m  📊 View Full Status Dashboard")
+        print("  \033[34m[ a ]\033[0m  🔒 Apply / Update Firewall Rules")
+        print("  \033[34m[ d ]\033[0m  ⚕️  Run System Doctor (Diagnostics)")
+        print()
+        print("  \033[34m[ b ]\033[0m  🚫 Block an IP Address")
+        print("  \033[34m[ u ]\033[0m  ✅ Unblock an IP Address")
+        print("  \033[34m[ l ]\033[0m  📋 View IP Lists (Blocked & Trusted)")
+        print()
+        print("  \033[34m[ r ]\033[0m  🔄 Restart Firewall Daemons")
+        print("  \033[34m[ q ]\033[0m  ❌ Quit")
+        print()
+        print("  \033[90mSelect an option: \033[0m", end="", flush=True)
         
-        try:
-            with open("/dev/tty", "r") as tty:
-                print("  Select an option [0-5]: ", end="", flush=True)
-                choice = tty.readline().strip()
-        except (KeyboardInterrupt, EOFError, OSError):
-            try:
-                choice = input("  Select an option [0-5]: ").strip()
-            except (KeyboardInterrupt, EOFError):
-                print()
-                break
+        choice = _get_key().lower()
 
-        if choice == "1":
+        if choice == "s":
             print("\033[2J\033[H", end="")
             subprocess.run(["sudo", "fw", "status"])
-            try:
-                with open("/dev/tty", "r") as tty:
-                    print("\n  Press Enter to return to menu...", end="", flush=True)
-                    tty.readline()
-            except OSError:
-                input("\n  Press Enter to return to menu...")
-        elif choice == "2":
-            print("\033[2J\033[H  Available profiles:\n")
+            _wait_for_enter()
+        elif choice == "a":
+            print("\033[2J\033[H  \033[1mAvailable profiles:\033[0m\n")
             subprocess.run(["fw", "profiles"])
-            try:
-                with open("/dev/tty", "r") as tty:
-                    print("\n  Enter profile name [cosmos-vpn-secure]: ", end="", flush=True)
-                    prof = tty.readline().strip() or "cosmos-vpn-secure"
-            except OSError:
-                prof = input("\n  Enter profile name [cosmos-vpn-secure]: ").strip() or "cosmos-vpn-secure"
+            prof = _prompt_tty("\n  Enter profile name [cosmos-vpn-secure]: ") or "cosmos-vpn-secure"
             subprocess.run(["sudo", "fw", "safe-apply", prof])
-            try:
-                with open("/dev/tty", "r") as tty:
-                    print("\n  Press Enter to return to menu...", end="", flush=True)
-                    tty.readline()
-            except OSError:
-                input("\n  Press Enter to return to menu...")
-        elif choice == "3":
-            try:
-                with open("/dev/tty", "r") as tty:
-                    print("\n  Enter IP/CIDR to block: ", end="", flush=True)
-                    ip = tty.readline().strip()
-            except OSError:
-                ip = input("\n  Enter IP/CIDR to block: ").strip()
+            _wait_for_enter()
+        elif choice == "d":
+            print("\033[2J\033[H", end="")
+            subprocess.run(["sudo", "fw", "doctor"])
+            _wait_for_enter()
+        elif choice == "b":
+            ip = _prompt_tty("\n  Enter IP/CIDR to block: ")
             if ip: subprocess.run(["sudo", "fw", "block", ip])
-            try:
-                with open("/dev/tty", "r") as tty:
-                    print("\n  Press Enter to return to menu...", end="", flush=True)
-                    tty.readline()
-            except OSError:
-                input("\n  Press Enter to return to menu...")
-        elif choice == "4":
-            try:
-                with open("/dev/tty", "r") as tty:
-                    print("\n  Enter IP/CIDR to unblock: ", end="", flush=True)
-                    ip = tty.readline().strip()
-            except OSError:
-                ip = input("\n  Enter IP/CIDR to unblock: ").strip()
+            _wait_for_enter()
+        elif choice == "u":
+            ip = _prompt_tty("\n  Enter IP/CIDR to unblock: ")
             if ip: subprocess.run(["sudo", "fw", "unblock", ip])
-            try:
-                with open("/dev/tty", "r") as tty:
-                    print("\n  Press Enter to return to menu...", end="", flush=True)
-                    tty.readline()
-            except OSError:
-                input("\n  Press Enter to return to menu...")
-        elif choice == "5":
+            _wait_for_enter()
+        elif choice == "l":
             print("\033[2J\033[H", end="")
             subprocess.run(["sudo", "fw", "ip-list"])
-            try:
-                with open("/dev/tty", "r") as tty:
-                    print("\n  Press Enter to return to menu...", end="", flush=True)
-                    tty.readline()
-            except OSError:
-                input("\n  Press Enter to return to menu...")
-        elif choice == "0":
+            _wait_for_enter()
+        elif choice == "r":
+            print("\n  \033[34m→\033[0m Restarting nft-watchdog...")
+            subprocess.run(["sudo", "systemctl", "restart", "nft-watchdog"])
+            _ok("Done.")
+            _wait_for_enter()
+        elif choice in {"q", "0", "\x1b"}:  # q, 0, or Esc
+            print("\033[2J\033[H", end="")
             break
+
+
+def _prompt_tty(prompt: str) -> str:
+    """Read a string from /dev/tty."""
+    print(prompt, end="", flush=True)
+    try:
+        with open("/dev/tty", "r") as tty:
+            return tty.readline().strip()
+    except OSError:
+        return input().strip()
+
+
+def _wait_for_enter() -> None:
+    """Hold the screen until the user acknowledges."""
+    print("\n  \033[90mPress any key to return to menu...\033[0m", end="", flush=True)
+    _get_key()
 
 
 # ── Parser construction ───────────────────────────────────────────────────────
