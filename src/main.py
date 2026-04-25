@@ -868,11 +868,14 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
         print("  \033[34m5.\033[0m  ✅ Unblock an IP Address")
         print("  \033[34m6.\033[0m  📋 View IP Lists (Blocked & Trusted)")
         print()
-        print("  \033[34m7.\033[0m  🔄 Restart Firewall Daemons")
+        print("  \033[34m7.\033[0m  📊 Live Firewall Logs (Activity)")
+        print("  \033[34m8.\033[0m  🌍 Geo-Block Manager (by Country)")
+        print()
+        print("  \033[34m9.\033[0m  🔄 Restart Firewall Daemons")
         print("  \033[34m0.\033[0m  ❌ Exit")
         print()
         
-        choice = _prompt_tty("  Select an option [0-7]: ")
+        choice = _prompt_tty("  Select an option [0-9]: ")
 
         if choice == "1":
             print("\033[2J\033[H", end="")
@@ -909,12 +912,68 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
             _cmd_ip_list(_args)
             _wait_for_any_key()
         elif choice == "7":
+            _menu_live_logs()
+        elif choice == "8":
+            _menu_geoblock(_args)
+        elif choice == "9":
             print("\n  \033[34m→\033[0m Restarting nft-watchdog...")
             subprocess.run(["sudo", "systemctl", "restart", "nft-watchdog"], capture_output=True)
             _ok("Done.")
             _wait_for_any_key()
         elif choice in {"0", "q", "exit"}:
             print("\033[2J\033[H", end="")
+            break
+
+
+def _menu_live_logs() -> None:
+    """Tails kernel logs for firewall drop events."""
+    import subprocess
+    print("\033[2J\033[H")
+    print("  \033[1m📊 Live Firewall Activity\033[0m")
+    print("  \033[90mWatching for dropped packets and VPN events...\033[0m")
+    print("  \033[90m(Press Ctrl+C to return to menu)\033[0m\n")
+    
+    try:
+        # Show kernel logs matching our drop prefixes
+        subprocess.run([
+            "sudo", "dmesg", "-w", "--level=info,warn,err", 
+            "--time-format=iso"
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
+           shell=False, check=False, 
+           # Filter for our specific nft prefixes
+           executable="/usr/bin/bash",
+           input="dmesg -w | grep -E 'nft-.*-drop|VPN'"
+        )
+    except KeyboardInterrupt:
+        pass
+
+
+def _menu_geoblock(args: argparse.Namespace) -> None:
+    """Sub-menu for managing country blocks."""
+    while True:
+        print("\033[2J\033[H")
+        print("  \033[1m🌍 Geo-Block Manager\033[0m")
+        print("  \033[90m──────────────────────────────────\033[0m")
+        _cmd_geolist(args)
+        print("\n  \033[34m1.\033[0m 🚫 Block a Country (e.g. CN, RU)")
+        print("  \033[34m2.\033[0m ✅ Unblock a Country")
+        print("  \033[34m0.\033[0m ⬅️  Back to Main Menu")
+        print()
+        
+        choice = _prompt_tty("  Select an option: ")
+        if choice == "1":
+            cc = _prompt_tty("\n  Enter Country Code(s) (e.g. CN RU): ").upper()
+            if cc and cc != "Q":
+                block_args = argparse.Namespace(country_codes=cc.split())
+                _cmd_geoblock(block_args)
+                _wait_for_any_key()
+        elif choice == "2":
+            cc = _prompt_tty("\n  Enter Country Code to unblock: ").upper()
+            if cc and cc != "Q":
+                unblock_args = argparse.Namespace(country_code=cc)
+                _cmd_geounblock(unblock_args)
+                _wait_for_any_key()
+        elif choice == "0" or choice.lower() == "q":
             break
 
 
