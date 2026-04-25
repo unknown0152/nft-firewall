@@ -189,6 +189,44 @@ def unblock_country(cc: str) -> int:
     return removed
 
 
+def whitelist_country(cc: str) -> "tuple[int, int]":
+    """Download and whitelist all CIDRs for country *cc* (Lockdown Mode)."""
+    import ipaddress
+    from core.state import set_add_bulk, SET_WHITELIST
+
+    cc = cc.upper()
+    print(f"  \033[34m→\033[0m Fetching CIDR list for {cc}...")
+    cidrs = _fetch_country(cc)
+    if not cidrs:
+        return (0, 0)
+
+    # Aggregation
+    networks = [ipaddress.ip_network(c.strip()) for c in cidrs if c.strip()]
+    to_add = [str(n) for n in ipaddress.collapse_addresses(networks)]
+    
+    print(f"  \033[34m→\033[0m Activating Lockdown for {cc} ({len(to_add)} supernets)...")
+    added = set_add_bulk(SET_WHITELIST, to_add)
+    
+    if added > 0:
+        print(f"  \033[32m✓\033[0m {cc} is now WHITELISTED. Lockdown active.")
+    return (added, 0)
+
+
+def clear_geowhitelist() -> None:
+    """Disable Lockdown Mode by clearing the whitelist set."""
+    from core.state import set_del_bulk, SET_WHITELIST, load_persistent_sets, save_persistent_sets
+    import subprocess
+
+    print(f"  \033[34m→\033[0m Disabling Lockdown Mode...")
+    subprocess.run(["nft", "flush", "set", "ip", "firewall", SET_WHITELIST], capture_output=True)
+    
+    sets = load_persistent_sets()
+    if SET_WHITELIST in sets:
+        sets[SET_WHITELIST] = []
+        save_persistent_sets(sets)
+    _ok("Lockdown Mode disabled.")
+
+
 def list_blocked() -> "dict[str, int]":
     """Return a summary of currently blocked countries and their CIDR counts."""
     state = _load_state()

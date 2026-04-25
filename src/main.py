@@ -170,6 +170,7 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
         allow_plex_lan     = profile.allow_plex_lan,
         blocked_ips        = dynamic_sets.get(state.SET_BLOCKED, []),
         trusted_ips        = dynamic_sets.get(state.SET_TRUSTED, []),
+        geowhitelist_ips   = dynamic_sets.get(state.SET_WHITELIST, []),
         dk_ips             = dynamic_sets.get(state.SET_DK, []),
     )
 
@@ -981,13 +982,14 @@ def _menu_geoblock(args: argparse.Namespace) -> None:
         print("\n  \033[34m1.\033[0m 🛡️  \033[1mBlock High-Risk Countries\033[0m (RU, CN, BR, IN, VN)")
         print("  \033[34m2.\033[0m 🚫 Block a Specific Country (e.g. RU)")
         print("  \033[34m3.\033[0m ✅ Unblock a Country")
+        print("  \033[34m4.\033[0m 🔒 \033[1mActivate Lockdown Mode\033[0m (Only allow DK)")
+        print("  \033[34m5.\033[0m 🔓 Disable Lockdown Mode")
         print("  \033[34m0.\033[0m ⬅️  Back to Main Menu")
         print()
         
         choice = _prompt_tty("  Select an option: ")
         if choice == "1":
             print("\n  \033[34m→\033[0m Protecting your current connection...")
-            # We'll implement a safety check here later
             for cc in ["RU", "CN", "BR", "IN", "VN"]:
                 _debug_log(f"Geoblock: Blocking high-risk {cc}")
                 block_country(cc)
@@ -1005,6 +1007,25 @@ def _menu_geoblock(args: argparse.Namespace) -> None:
                 _debug_log(f"Geoblock: Unblocking country {cc}")
                 unblock_country(cc)
                 _wait_for_any_key()
+        elif choice == "4":
+            cc = _prompt_tty("\n  Enter country to ONLY ALLOW (e.g. DK): ").upper()
+            if cc and cc != "Q":
+                _debug_log(f"Geoblock: Lockdown to {cc}")
+                from integrations.geoblock import whitelist_country
+                whitelist_country(cc)
+                print("\n  \033[33m⚠️  IMPORTANT:\033[0m You must reload firewall for Lockdown to take full effect.")
+                if _prompt_tty("  Reload now? [y/N]: ").lower() == 'y':
+                    prof = _load_config().get("install", "profile", fallback="cosmos-vpn-secure")
+                    subprocess.run(["sudo", "fw", "safe-apply", prof])
+                _wait_for_any_key()
+        elif choice == "5":
+            _debug_log("Geoblock: Clearing whitelist")
+            from integrations.geoblock import clear_geowhitelist
+            clear_geowhitelist()
+            print("\n  \033[33m⚠️  IMPORTANT:\033[0m Reloading firewall to restore normal access.")
+            prof = _load_config().get("install", "profile", fallback="cosmos-vpn-secure")
+            subprocess.run(["sudo", "fw", "safe-apply", prof])
+            _wait_for_any_key()
         elif choice == "0" or choice.lower() == "q":
             _debug_log("Geoblock manager closed")
             break

@@ -49,13 +49,14 @@ _PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent.parent
 _BACKUP_DIR:   Path = _PROJECT_ROOT / "state"
 
 NFT_CONF:    Path = Path("/etc/nftables.conf")
-SET_BLOCKED: str  = "blocked_ips"
-SET_TRUSTED: str  = "trusted_ips"
-SET_DK:      str  = "dk_ips"
-TABLE:       str  = "ip firewall"
+SET_BLOCKED:   str  = "blocked_ips"
+SET_TRUSTED:   str  = "trusted_ips"
+SET_WHITELIST: str  = "geowhitelist_ips"
+SET_DK:        str  = "dk_ips"
+TABLE:         str  = "ip firewall"
 
 _SETS_STATE_FILE: Path = Path("/var/lib/nft-firewall/dynamic-sets.json")
-_KNOWN_SETS: tuple[str, ...] = (SET_BLOCKED, SET_TRUSTED, SET_DK)
+_KNOWN_SETS: tuple[str, ...] = (SET_BLOCKED, SET_TRUSTED, SET_WHITELIST, SET_DK)
 
 
 # ── Apply & validate ──────────────────────────────────────────────────────────

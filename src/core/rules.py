@@ -120,6 +120,7 @@ class RulesetConfig:
     # Persisted dynamic sets
     blocked_ips: List[str] = field(default_factory=list)
     trusted_ips: List[str] = field(default_factory=list)
+    geowhitelist_ips: List[str] = field(default_factory=list)
     dk_ips:      List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -420,6 +421,12 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     )
     _emit_dynamic_set(
         L,
+        "geowhitelist_ips",
+        "Lockdown mode whitelist — if non-empty, only these public IPs are allowed.",
+        cfg.geowhitelist_ips,
+    )
+    _emit_dynamic_set(
+        L,
         "dk_ips",
         "DK GeoIP set — SSH allowed from Danish IPs.",
         cfg.dk_ips,
@@ -447,11 +454,19 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a('        iifname "lo" accept')
     a("        ct state established,related accept")
     a("        ct state invalid drop")
-    a("")
-    a("        # Global block list (highest priority after connection tracking)")
+    # Global block list (highest priority after connection tracking)
     a("        ip saddr @blocked_ips drop")
     a("")
+
+    # LOCKDOWN MODE: If geowhitelist is not empty, drop EVERYTHING ELSE from internet
+    if cfg.geowhitelist_ips:
+    a("        # LOCKDOWN MODE: Only allow specific countries from internet.")
+    a(f"        {PHY} ip saddr @geowhitelist_ips accept comment \"Lockdown: Country Whitelist\"")
+    a(f"        {PHY} ip saddr != {cfg.lan_net} drop comment \"Lockdown: Non-whitelisted country drop\"")
+    a("")
+
     a("        # Trusted admin IPs — SSH override (before LAN/VPN restriction)")
+
     a(f"        {PHY} ip saddr @trusted_ips tcp dport {ssh} accept"
       "   # admin SSH override")
     a("")
