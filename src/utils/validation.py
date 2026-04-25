@@ -79,6 +79,8 @@ def validate_ipv4_network(value: str, *, allow_network: bool = True) -> Validati
         return ValidationResult(False, reason=f"invalid IP/CIDR: {raw!r}")
     if not isinstance(net, ipaddress.IPv4Network):
         return ValidationResult(False, reason=f"IPv6 is not supported here: {raw!r}")
+    if net.prefixlen == 0:
+        return ValidationResult(False, reason="refusing /0 — would block or trust entire internet")
     if not allow_network and net.prefixlen != 32:
         return ValidationResult(False, reason=f"CIDR network not allowed: {raw!r}")
     return ValidationResult(True, str(net if "/" in raw or net.prefixlen != 32 else net.network_address))

@@ -1,0 +1,223 @@
+"""
+tests/unit/test_watchdog.py — Unit tests for NftWatchdog.
+
+Covers:
+- _vpn_is_healthy: interface missing / no IP / stale handshake / healthy
+- _check_nftables_integrity: missing output_rule marker / missing ip6 table
+- _attempt_recovery: stops at first successful level / escalates through all levels
+
+All subprocess calls are patched out — no root, no WireGuard required.
+"""
+import configparser
+import sys
+import time
+from pathlib import Path
+from unittest.mock import MagicMock, call, patch
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+from daemons.watchdog import NftWatchdog
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _make_cfg(handshake_timeout: int = 180, interface: str = "wg0") -> configparser.ConfigParser:
+    cfg = configparser.ConfigParser()
+    cfg["vpn"] = {"interface": interface, "handshake_timeout": str(handshake_timeout)}
+    cfg["watchdog"] = {"hostname": "testhost"}
+    cfg["keybase"] = {"team": "", "target_user": "", "channel": "general", "linux_user": ""}
+    return cfg
+
+
+def _wd() -> NftWatchdog:
+    wd = NftWatchdog(config_path="/dev/null")
+    wd._cfg = _make_cfg()
+    return wd
+
+
+# ── _vpn_is_healthy ───────────────────────────────────────────────────────────
+
+class TestVpnIsHealthy:
+
+    def test_interface_missing(self):
+        wd = _wd()
+        with patch.object(wd, "_run", return_value=(False, "", "link not found")):
+            ok, reason = wd._vpn_is_healthy(_make_cfg())
+        assert not ok
+        assert "does not exist" in reason
+
+    def test_no_ip_address(self):
+        wd = _wd()
+        def _run(cmd, **kw):
+            if cmd[0] == "ip" and "show" in cmd:
+                return True, "4: wg0: <POINTOPOINT,UP> ...", ""  # present but no inet line
+            return True, "", ""
+        with patch.object(wd, "_run", side_effect=_run):
+            ok, reason = wd._vpn_is_healthy(_make_cfg())
+        assert not ok
+        assert "no IP" in reason
+
+    def test_handshake_never_recorded(self):
+        wd = _wd()
+        def _run(cmd, **kw):
+            if cmd[0] == "ip":
+                return True, "inet 10.99.0.2/32", ""
+            if cmd[0] == "wg":
+                return True, "", ""   # empty output → no handshake
+            return True, "", ""
+        with patch.object(wd, "_run", side_effect=_run):
+            ok, reason = wd._vpn_is_healthy(_make_cfg())
+        assert not ok
+        assert "no WireGuard handshake" in reason
+
+    def test_stale_handshake_triggers_degraded(self):
+        """A handshake older than handshake_timeout must cause DEGRADED."""
+        wd = _wd()
+        old_ts = int(time.time()) - 999          # 999 s > 180 s timeout
+
+        def _run(cmd, **kw):
+            if cmd[0] == "ip":
+                return True, "inet 10.99.0.2/32", ""
+            if cmd[0] == "wg" and "latest-handshakes" in cmd:
+                return True, f"somepubkey\t{old_ts}", ""
+            return True, "", ""
+
+        with patch.object(wd, "_run", side_effect=_run):
+            ok, reason = wd._vpn_is_healthy(_make_cfg(handshake_timeout=180))
+        assert not ok
+        assert "999s ago" in reason or "limit 180s" in reason
+
+    def test_fresh_handshake_is_healthy(self):
+        wd = _wd()
+        fresh_ts = int(time.time()) - 30          # 30 s < 180 s timeout
+
+        def _run(cmd, **kw):
+            if cmd[0] == "ip":
+                return True, "inet 10.99.0.2/32", ""
+            if cmd[0] == "wg" and "latest-handshakes" in cmd:
+                return True, f"somepubkey\t{fresh_ts}", ""
+            return True, "", ""
+
+        with patch.object(wd, "_run", side_effect=_run):
+            ok, reason = wd._vpn_is_healthy(_make_cfg(handshake_timeout=180))
+        assert ok
+        assert "UP" in reason
+
+
+# ── _check_nftables_integrity ─────────────────────────────────────────────────
+
+class TestNftablesIntegrity:
+
+    def _wd_with_markers(self, output_rule="nft-killswitch-output", ip6_table="fw6"):
+        wd = _wd()
+        wd._markers = {
+            "vpn_iface": "wg0",
+            "output_rule": output_rule,
+            "ip6_table": ip6_table,
+        }
+        return wd
+
+    def test_output_rule_marker_missing(self):
+        wd = self._wd_with_markers()
+        with patch.object(wd, "_run", return_value=(True, "# some other rules", "")):
+            ok, reason = wd._check_nftables_integrity("wg0")
+        assert not ok
+        assert "output" in reason.lower() or "missing" in reason.lower()
+
+    def test_ip6_table_missing(self):
+        wd = self._wd_with_markers(output_rule="nft-killswitch-output", ip6_table="fw6")
+        ruleset = "nft-killswitch-output\n# no ip6 table here"
+        with patch.object(wd, "_run", return_value=(True, ruleset, "")):
+            ok, reason = wd._check_nftables_integrity("wg0")
+        assert not ok
+        assert "fw6" in reason or "ip6" in reason.lower()
+
+    def test_both_markers_present_is_ok(self):
+        wd = self._wd_with_markers(output_rule="nft-killswitch-output", ip6_table="fw6")
+        ruleset = "nft-killswitch-output\ntable ip6 fw6 {\n}"
+        with patch.object(wd, "_run", return_value=(True, ruleset, "")):
+            ok, _ = wd._check_nftables_integrity("wg0")
+        assert ok
+
+    def test_nft_command_failure_returns_false(self):
+        wd = self._wd_with_markers()
+        with patch.object(wd, "_run", return_value=(False, "", "permission denied")):
+            ok, reason = wd._check_nftables_integrity("wg0")
+        assert not ok
+
+    def test_no_markers_loaded_skips_check(self):
+        wd = _wd()
+        wd._markers = None
+        # Should return True and skip the nft call entirely
+        ok, _ = wd._check_nftables_integrity("wg0")
+        assert ok
+
+
+# ── _attempt_recovery ─────────────────────────────────────────────────────────
+
+class TestAttemptRecovery:
+
+    def _wd_patched_recovery(self, level_results: list) -> NftWatchdog:
+        """Return a watchdog whose recovery levels succeed/fail per level_results.
+
+        level_results is a list of 4 bools: True = that level brings wg0 up.
+        """
+        wd = _wd()
+        cfg = _make_cfg()
+
+        # Patch each level method
+        for i, succeeds in enumerate(level_results, start=1):
+            setattr(wd, f"_level{i}_soft_restart" if i == 1 else
+                        f"_level{i}_hard_restart" if i == 2 else
+                        f"_level{i}_dns_reresolve" if i == 3 else
+                        f"_level{i}_full_recreation",
+                    MagicMock(return_value=succeeds))
+
+        # Always report interface present after a level attempt
+        wd._run = MagicMock(return_value=(True, "", ""))
+        # _wait_for_handshake succeeds when the corresponding level succeeded
+        wd._wait_for_handshake = MagicMock(return_value=(True, 10))
+        wd._vpn_is_healthy = MagicMock(return_value=(True, "UP 10.0.0.1 handshake 10s ago"))
+        return wd, cfg
+
+    def test_stops_at_level1_when_it_succeeds(self):
+        wd, cfg = self._wd_patched_recovery([True, True, True, True])
+        success, level = wd._attempt_recovery(cfg, "wg0", recovery_wait=1)
+        assert success
+        assert level == 1
+        wd._level1_soft_restart.assert_called_once()
+        wd._level2_hard_restart.assert_not_called()
+
+    def test_escalates_to_level2_when_level1_fails(self):
+        wd, cfg = self._wd_patched_recovery([False, True, True, True])
+        # Level 1 fails: _wait_for_handshake returns False the first time
+        wd._wait_for_handshake = MagicMock(side_effect=[(False, None), (True, 10)])
+        success, level = wd._attempt_recovery(cfg, "wg0", recovery_wait=1)
+        assert success
+        assert level == 2
+        wd._level1_soft_restart.assert_called_once()
+        wd._level2_hard_restart.assert_called_once()
+
+    def test_returns_false_when_all_levels_exhausted(self):
+        wd, cfg = self._wd_patched_recovery([False, False, False, False])
+        wd._wait_for_handshake = MagicMock(return_value=(False, None))
+        success, level = wd._attempt_recovery(cfg, "wg0", recovery_wait=1)
+        assert not success
+        assert level == 0
+
+    def test_skips_handshake_wait_when_interface_absent(self):
+        """If the interface is not up after a level, skip the handshake poll."""
+        wd, cfg = self._wd_patched_recovery([False, True, True, True])
+        wait_mock = MagicMock(return_value=(True, 10))
+        wd._wait_for_handshake = wait_mock
+        # Level 1 leaves interface absent; level 2 brings it up
+        wd._run = MagicMock(side_effect=[
+            (False, "", ""),  # ip link show after level 1 — absent
+            (True, "", ""),   # ip link show after level 2 — present
+        ])
+        wd._vpn_is_healthy = MagicMock(return_value=(True, "UP"))
+        wd._attempt_recovery(cfg, "wg0", recovery_wait=1)
+        # _wait_for_handshake should NOT have been called for level 1
+        # (interface was absent), only for level 2
+        assert wait_mock.call_count == 1

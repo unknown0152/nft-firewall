@@ -30,6 +30,11 @@ def _patch_doctor_common(monkeypatch, ruleset=None):
         lambda: ("ok", "Docker iptables=false and ip6tables=false"),
     )
     monkeypatch.setattr(
+        main,
+        "_nftables_service_status",
+        lambda: ("ok", "nftables.service is enabled"),
+    )
+    monkeypatch.setattr(
         core.rules,
         "generate_ruleset",
         lambda _cfg, exposed_ports=None: ruleset
@@ -105,3 +110,62 @@ def test_doctor_warns_when_sudo_wrapper_permission_missing(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert exc.value.code == 0
     assert "[warn] nft --check: nft --check requires installed sudo wrapper; run setup.py install or run doctor as root" in out
+
+
+def test_doctor_fails_when_docker_iptables_enabled(monkeypatch, capsys):
+    main, state = _patch_doctor_common(monkeypatch)
+
+    import integrations.docker
+
+    monkeypatch.setattr(main.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state, "simulate_apply", lambda _ruleset: (True, ""))
+    monkeypatch.setattr(
+        integrations.docker,
+        "firewall_policy_status",
+        lambda: ("fail", "Docker can manage firewall rules"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main._cmd_doctor(types.SimpleNamespace(profile="cosmos-vpn-secure"))
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "[fail] docker firewall authority: Docker can manage firewall rules" in out
+
+
+def test_doctor_detects_broad_zero_generated_rules(monkeypatch, capsys):
+    ruleset = (
+        'table ip6 killswitch { chain input { priority -300; } }\n'
+        'table ip firewall { chain output { oifname "wg0" accept }\n'
+        'chain input { iifname "eth0" ip saddr 0.0.0.0/0 accept } }\n'
+    )
+    main, state = _patch_doctor_common(monkeypatch, ruleset=ruleset)
+
+    monkeypatch.setattr(main.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state, "simulate_apply", lambda _ruleset: (True, ""))
+
+    with pytest.raises(SystemExit) as exc:
+        main._cmd_doctor(types.SimpleNamespace(profile="cosmos-vpn-secure"))
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "[fail] broad /0 generated rules" in out
+
+
+def test_doctor_detects_public_web_on_physical(monkeypatch, capsys):
+    ruleset = (
+        'table ip6 killswitch { chain input { priority -300; } }\n'
+        'table ip firewall { chain output { oifname "wg0" accept }\n'
+        'chain input { iifname "eth0" tcp dport { 80, 443 } accept } }\n'
+    )
+    main, state = _patch_doctor_common(monkeypatch, ruleset=ruleset)
+
+    monkeypatch.setattr(main.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state, "simulate_apply", lambda _ruleset: (True, ""))
+
+    with pytest.raises(SystemExit) as exc:
+        main._cmd_doctor(types.SimpleNamespace(profile="cosmos-vpn-secure"))
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "[fail] physical public 80/443" in out

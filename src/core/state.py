@@ -175,6 +175,12 @@ def _canonical_set_name(set_name: str) -> str:
 
 def load_persistent_sets(path: Path = _SETS_STATE_FILE) -> dict[str, list[str]]:
     """Load dynamic set members persisted across ruleset reloads."""
+    from utils.validation import (
+        validate_block_target,
+        validate_ipv4_network,
+        validate_trusted_target,
+    )
+
     data: dict[str, list[str]] = {name: [] for name in _KNOWN_SETS}
     if not path.exists():
         return data
@@ -187,7 +193,25 @@ def load_persistent_sets(path: Path = _SETS_STATE_FILE) -> dict[str, list[str]]:
     for name in _KNOWN_SETS:
         values = raw.get(name, [])
         if isinstance(values, list):
-            data[name] = sorted({str(v).strip() for v in values if str(v).strip()})
+            clean: set[str] = set()
+            for value in values:
+                raw_value = str(value).strip()
+                if not raw_value:
+                    continue
+                if name == SET_BLOCKED:
+                    result = validate_block_target(raw_value)
+                elif name == SET_TRUSTED:
+                    result = validate_trusted_target(raw_value)
+                else:
+                    result = validate_ipv4_network(raw_value)
+                if result.ok:
+                    clean.add(result.value)
+                else:
+                    print(
+                        f"[state] WARNING: ignored unsafe persisted {name} member "
+                        f"{raw_value!r}: {result.reason}"
+                    )
+            data[name] = sorted(clean)
     return data
 
 

@@ -204,6 +204,58 @@ def _parse_int(value: str, key: str) -> int:
         raise ValueError(f"Config key '{key}' has non-integer value: {value!r}")
 
 
+def _nftables_service_status() -> tuple[str, str]:
+    """Return doctor status for nftables.service boot persistence."""
+    import shutil
+    import subprocess
+
+    if shutil.which("systemctl") is None:
+        return ("warn", "systemctl not found; cannot verify nftables.service enablement")
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-enabled", "nftables.service"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        return ("warn", f"cannot verify nftables.service enablement: {exc}")
+
+    state = (result.stdout or result.stderr).strip() or f"rc={result.returncode}"
+    if result.returncode == 0 and state in {"enabled", "enabled-runtime", "static"}:
+        return ("ok", f"nftables.service is {state}")
+    return ("fail", f"nftables.service is not enabled ({state})")
+
+
+def _ruleset_has_broad_zero(ruleset: str) -> bool:
+    """Return True if generated nft syntax contains the IPv4 default route."""
+    return "0.0.0.0/0" in ruleset
+
+
+def _physical_public_web_lines(ruleset: str, phy_if: str, lan_net: str = "") -> list[str]:
+    """Return physical-interface rules that publicly expose TCP 80/443."""
+    import re
+
+    marker = f'iifname "{phy_if}"'
+    matches: list[str] = []
+    for line in ruleset.splitlines():
+        stripped = line.strip()
+        if marker not in stripped or "tcp dport" not in stripped:
+            continue
+        port_match = re.search(r"tcp dport\s+(\{[^}]+\}|\d+)", stripped)
+        if not port_match:
+            continue
+        ports = {int(p) for p in re.findall(r"\d+", port_match.group(1))}
+        if not ({80, 443} & ports):
+            continue
+        if " accept" not in stripped and " dnat " not in stripped:
+            continue
+        if lan_net and f"ip saddr {lan_net}" in stripped:
+            continue
+        matches.append(stripped)
+    return matches
+
+
 def _never_block_from_config(cfg: configparser.ConfigParser) -> List[str]:
     """Return configured never-block CIDRs, always including the LAN subnet."""
     from utils.validation import parse_never_block
@@ -471,7 +523,10 @@ def _cmd_ip_list(_args: argparse.Namespace) -> None:
 
 
 def _cmd_docker_expose(args: argparse.Namespace) -> None:
-    from integrations.docker import add_expose
+    from integrations.docker import add_expose, detect_bridge_networks
+    cfg = _load_config()
+    container_supernet = cfg.get("network", "container_supernet", fallback="172.16.0.0/12")
+    docker_networks = detect_bridge_networks(container_supernet)
     try:
         add_expose(
             host_port      = args.host_port,
@@ -479,6 +534,7 @@ def _cmd_docker_expose(args: argparse.Namespace) -> None:
             container_port = args.container_port,
             proto          = args.proto,
             src            = getattr(args, "src", None),
+            allowed_networks = docker_networks,
         )
     except ValueError as exc:
         _die(str(exc))
@@ -556,6 +612,23 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         ruleset = generate_ruleset(ruleset_cfg, exposed_ports=exposed)
         docker_status, docker_detail = firewall_policy_status()
         checks.append(("docker firewall authority", docker_status, docker_detail))
+        checks.append(("nftables.service", *_nftables_service_status()))
+        broad_zero = _ruleset_has_broad_zero(ruleset)
+        checks.append((
+            "broad /0 generated rules",
+            "fail" if broad_zero else "ok",
+            "0.0.0.0/0 present in generated ruleset" if broad_zero else "no IPv4 /0 generated",
+        ))
+        public_phy = _physical_public_web_lines(
+            ruleset,
+            ruleset_cfg.phy_if,
+            getattr(ruleset_cfg, "lan_net", ""),
+        )
+        checks.append((
+            "physical public 80/443",
+            "fail" if public_phy else "ok",
+            "; ".join(public_phy) if public_phy else "no public web accept on physical interface",
+        ))
         if os.geteuid() == 0:
             ok, err = state.simulate_apply(ruleset)
             checks.append(("nft --check", "ok" if ok else "fail",

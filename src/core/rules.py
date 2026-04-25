@@ -31,6 +31,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from utils.validation import (
+    validate_block_target,
+    validate_ipv4_network,
+    validate_trusted_target,
+)
+
 # ── Data contract ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -116,6 +122,22 @@ class RulesetConfig:
     trusted_ips: List[str] = field(default_factory=list)
     dk_ips:      List[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        """Reject unsafe network inputs before any nft syntax is generated."""
+        for label, value in (
+            ("lan_net", self.lan_net),
+            ("container_supernet", self.container_supernet),
+        ):
+            result = validate_ipv4_network(value)
+            if not result.ok:
+                raise ValueError(f"{label}: {result.reason}")
+            setattr(self, label, result.value)
+
+        self.docker_networks = _validated_network_list("docker_networks", self.docker_networks)
+        self.blocked_ips = _validated_set_members("blocked_ips", self.blocked_ips)
+        self.trusted_ips = _validated_set_members("trusted_ips", self.trusted_ips)
+        self.dk_ips = _validated_set_members("dk_ips", self.dk_ips)
+
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -139,6 +161,33 @@ def _iface_vars(cfg: RulesetConfig) -> Dict[str, str]:
 def _pset(ports) -> str:
     """Format a collection of ports as an nftables set literal, e.g. ``{ 22, 80 }``."""
     return "{ " + ", ".join(str(p) for p in sorted(set(ports))) + " }"
+
+
+def _validated_network_list(label: str, values: List[str]) -> List[str]:
+    """Return normalized IPv4 networks, rejecting /0 and malformed values."""
+    normalized: List[str] = []
+    for value in values:
+        result = validate_ipv4_network(value)
+        if not result.ok:
+            raise ValueError(f"{label}: {result.reason}")
+        normalized.append(result.value)
+    return normalized
+
+
+def _validated_set_members(set_name: str, values: List[str]) -> List[str]:
+    """Validate persisted dynamic set members before embedding them in nftables."""
+    normalized: List[str] = []
+    for value in values:
+        if set_name == "blocked_ips":
+            result = validate_block_target(value)
+        elif set_name == "trusted_ips":
+            result = validate_trusted_target(value)
+        else:
+            result = validate_ipv4_network(value)
+        if not result.ok:
+            raise ValueError(f"{set_name}: {result.reason}")
+        normalized.append(result.value)
+    return normalized
 
 
 def _normalize_intervals(elements: List[str]) -> List[str]:
@@ -180,10 +229,32 @@ def _emit_dynamic_set(lines: List[str], name: str, comment: str, elements: List[
 def _allowed_exposed_ports(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[Dict]:
     """Return exposed entries whose host port is explicitly allowed by config."""
     allowed_tcp = set(cfg.cosmos_public_ports)
-    return [
-        e for e in exposed_ports
-        if e.get("proto", "tcp") == "tcp" and int(e["host_port"]) in allowed_tcp
-    ]
+    allowed: List[Dict] = []
+    for entry in exposed_ports:
+        try:
+            proto = str(entry.get("proto", "tcp")).lower()
+            host_port = int(entry["host_port"])
+            container_port = int(entry["container_port"])
+            container_ip = str(entry["container_ip"])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        if proto != "tcp" or host_port not in allowed_tcp:
+            continue
+        ip_result = validate_ipv4_network(container_ip, allow_network=False)
+        if not ip_result.ok:
+            continue
+        cleaned = dict(entry)
+        cleaned["proto"] = proto
+        cleaned["host_port"] = host_port
+        cleaned["container_port"] = container_port
+        cleaned["container_ip"] = ip_result.value
+        if cleaned.get("src"):
+            src_result = validate_ipv4_network(str(cleaned["src"]))
+            if not src_result.ok:
+                continue
+            cleaned["src"] = src_result.value
+        allowed.append(cleaned)
+    return allowed
 
 
 def _build_header(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[str]:

@@ -30,3 +30,15 @@ def test_fw_wrapper_blocks_plain_apply():
     text = script.read_text()
     assert "safe-apply" in text
     assert "use 'fw safe-apply <profile>'" in text
+
+
+def test_firewall_threatfeed_service_uses_real_cli_command():
+    service = (
+        Path(__file__).resolve().parent.parent.parent
+        / "systemd"
+        / "nft-firewall-threatfeed.service"
+    )
+    text = service.read_text()
+
+    assert "ExecStart=/usr/local/bin/fw threat-update" in text
+    assert "threatfeed update" not in text

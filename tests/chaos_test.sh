@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # /opt/nft-firewall/tests/chaos_test.sh
-# NFT Firewall v11 — Chaos Engineering Test Suite
+# NFT Firewall v12 — Chaos Engineering Test Suite
 #
 # Usage:
 #   sudo bash /opt/nft-firewall/tests/chaos_test.sh

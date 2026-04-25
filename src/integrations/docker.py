@@ -36,7 +36,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from utils.validation import validate_ipv4_network, validate_port
 
@@ -65,7 +65,7 @@ def firewall_policy_status(daemon_path: Path = DAEMON_JSON) -> tuple[str, str]:
     try:
         if not daemon_path.exists():
             return (
-                "warn",
+                "fail",
                 f"{daemon_path} not found; Docker defaults may manage firewall rules",
             )
         data = json.loads(daemon_path.read_text())
@@ -213,10 +213,25 @@ def load_registry(path: Path = EXPOSE_CONF) -> List[Dict]:
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text())
+        raw = json.loads(path.read_text())
     except Exception as exc:
         print(f"[docker] WARNING: could not read registry ({exc}) — returning empty list")
         return []
+    if not isinstance(raw, list):
+        print("[docker] WARNING: expose registry is not a list — returning empty list")
+        return []
+
+    entries: List[Dict] = []
+    skipped = 0
+    for item in raw:
+        cleaned = _clean_registry_entry(item)
+        if cleaned is None:
+            skipped += 1
+            continue
+        entries.append(cleaned)
+    if skipped:
+        print(f"[docker] WARNING: ignored {skipped} malformed expose registry entries")
+    return entries
 
 
 def save_registry(entries: List[Dict], path: Path = EXPOSE_CONF) -> None:
@@ -242,6 +257,7 @@ def add_expose(
     container_port: int,
     proto:          str = "tcp",
     src:            Optional[str] = None,
+    allowed_networks: Optional[Iterable[str]] = None,
     path:           Path = EXPOSE_CONF,
 ) -> None:
     """Add a container port forwarding entry to the expose registry.
@@ -276,11 +292,18 @@ def add_expose(
         raise ValueError(f"Invalid container IP: {container_ip!r}")
     container_ip = result.value
 
+    if allowed_networks is not None:
+        _validate_container_destination(container_ip, allowed_networks)
+
     if src is not None:
         src_result = validate_ipv4_network(src)
         if not src_result.ok:
             raise ValueError(f"Invalid src network: {src!r}")
         src = src_result.value
+
+    proto = str(proto).lower()
+    if proto not in {"tcp", "udp"}:
+        raise ValueError(f"proto must be tcp or udp, got {proto!r}")
 
     host_port = validate_port(host_port, "host_port")
     container_port = validate_port(container_port, "container_port")
@@ -359,6 +382,55 @@ def list_exposed(path: Path = EXPOSE_CONF) -> List[Dict]:
     return load_registry(path)
 
 
+def _clean_registry_entry(entry: object) -> Optional[Dict]:
+    """Return a validated expose registry entry, or None for malformed input."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        host_port = validate_port(entry.get("host_port"), "host_port")
+        container_port = validate_port(entry.get("container_port"), "container_port")
+        proto = str(entry.get("proto", "tcp")).lower()
+    except ValueError:
+        return None
+    if proto not in {"tcp", "udp"}:
+        return None
+
+    ip_result = validate_ipv4_network(str(entry.get("container_ip", "")), allow_network=False)
+    if not ip_result.ok:
+        return None
+
+    cleaned: Dict = {
+        "host_port": host_port,
+        "container_ip": ip_result.value,
+        "container_port": container_port,
+        "proto": proto,
+    }
+    if entry.get("src") is not None:
+        src_result = validate_ipv4_network(str(entry["src"]))
+        if not src_result.ok:
+            return None
+        cleaned["src"] = src_result.value
+    return cleaned
+
+
+def _validate_container_destination(container_ip: str, allowed_networks: Iterable[str]) -> None:
+    """Ensure *container_ip* is inside at least one validated Docker network."""
+    addr = ipaddress.ip_address(container_ip)
+    networks = []
+    for raw in allowed_networks:
+        result = validate_ipv4_network(str(raw))
+        if not result.ok:
+            continue
+        networks.append(ipaddress.ip_network(result.value, strict=False))
+    if not networks:
+        raise ValueError("No valid Docker networks configured; refusing docker-expose")
+    if not any(addr in net for net in networks):
+        allowed = ", ".join(str(net) for net in networks)
+        raise ValueError(
+            f"container_ip {container_ip} is outside configured Docker networks: {allowed}"
+        )
+
+
 def detect_bridge_networks(default_supernet: str = "172.16.0.0/12") -> List[str]:
     """Return IPv4 CIDRs for Docker bridge networks, or a conservative fallback.
 
@@ -367,7 +439,8 @@ def detect_bridge_networks(default_supernet: str = "172.16.0.0/12") -> List[str]
     the current user, the configured supernet is returned so the firewall keeps
     the existing container killswitch coverage.
     """
-    fallback = [default_supernet] if default_supernet else []
+    default_result = validate_ipv4_network(default_supernet) if default_supernet else None
+    fallback = [default_result.value] if default_result and default_result.ok else []
     if shutil.which("docker") is None:
         return fallback
 
