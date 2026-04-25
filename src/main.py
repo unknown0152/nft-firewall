@@ -927,29 +927,23 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
 
 def _menu_live_logs() -> None:
     """Tails kernel logs for firewall drop events."""
-    import subprocess
+    import os
     print("\033[2J\033[H")
     print("  \033[1m📊 Live Firewall Activity\033[0m")
     print("  \033[90mWatching for dropped packets and VPN events...\033[0m")
     print("  \033[90m(Press Ctrl+C to return to menu)\033[0m\n")
     
     try:
-        # Show kernel logs matching our drop prefixes
-        subprocess.run([
-            "sudo", "dmesg", "-w", "--level=info,warn,err", 
-            "--time-format=iso"
-        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
-           shell=False, check=False, 
-           # Filter for our specific nft prefixes
-           executable="/usr/bin/bash",
-           input="dmesg -w | grep -E 'nft-.*-drop|VPN'"
-        )
+        # Use os.system for a simple, robust tail + grep
+        # This handles the TTY and colors much better for a live view
+        os.system("sudo dmesg -w | grep --line-buffered -E 'nft-.*-drop|VPN'")
     except KeyboardInterrupt:
         pass
 
 
 def _menu_geoblock(args: argparse.Namespace) -> None:
     """Sub-menu for managing country blocks."""
+    from integrations.geoblock import block_country, unblock_country
     while True:
         print("\033[2J\033[H")
         print("  \033[1m🌍 Geo-Block Manager\033[0m")
@@ -962,16 +956,17 @@ def _menu_geoblock(args: argparse.Namespace) -> None:
         
         choice = _prompt_tty("  Select an option: ")
         if choice == "1":
-            cc = _prompt_tty("\n  Enter Country Code(s) (e.g. CN RU): ").upper()
-            if cc and cc != "Q":
-                block_args = argparse.Namespace(country_codes=cc.split())
-                _cmd_geoblock(block_args)
+            cc_input = _prompt_tty("\n  Enter Country Code(s) (e.g. CN RU): ").upper()
+            if cc_input and cc_input != "Q":
+                for cc in cc_input.split():
+                    print(f"\n  \033[34m→\033[0m Downloading and blocking {cc}...")
+                    block_country(cc)
                 _wait_for_any_key()
         elif choice == "2":
             cc = _prompt_tty("\n  Enter Country Code to unblock: ").upper()
             if cc and cc != "Q":
-                unblock_args = argparse.Namespace(country_code=cc)
-                _cmd_geounblock(unblock_args)
+                print(f"\n  \033[34m→\033[0m Removing blocks for {cc}...")
+                unblock_country(cc)
                 _wait_for_any_key()
         elif choice == "0" or choice.lower() == "q":
             break
