@@ -860,66 +860,60 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
         print(f"  Load:   \033[36m{load:.2f}\033[0m")
         print("  \033[90m──────────────────────────────────────────────────\033[0m")
         print()
-        print("  \033[34m[ s ]\033[0m  📊 View Full Status Dashboard")
-        print("  \033[34m[ a ]\033[0m  🔒 Apply / Update Firewall Rules")
-        print("  \033[34m[ d ]\033[0m  ⚕️  Run System Doctor (Diagnostics)")
+        print("  \033[34m1.\033[0m  📊 View Full Status Dashboard")
+        print("  \033[34m2.\033[0m  🔒 Apply / Update Firewall Rules")
+        print("  \033[34m3.\033[0m  ⚕️  Run System Doctor (Diagnostics)")
         print()
-        print("  \033[34m[ b ]\033[0m  🚫 Block an IP Address")
-        print("  \033[34m[ u ]\033[0m  ✅ Unblock an IP Address")
-        print("  \033[34m[ l ]\033[0m  📋 View IP Lists (Blocked & Trusted)")
+        print("  \033[34m4.\033[0m  🚫 Block an IP Address")
+        print("  \033[34m5.\033[0m  ✅ Unblock an IP Address")
+        print("  \033[34m6.\033[0m  📋 View IP Lists (Blocked & Trusted)")
         print()
-        print("  \033[34m[ r ]\033[0m  🔄 Restart Firewall Daemons")
-        print("  \033[34m[ q ]\033[0m  ❌ Quit")
+        print("  \033[34m7.\033[0m  🔄 Restart Firewall Daemons")
+        print("  \033[34m0.\033[0m  ❌ Exit")
         print()
-        print("  \033[90mSelect an option: \033[0m", end="", flush=True)
         
-        choice = _get_key().lower()
+        choice = _prompt_tty("  Select an option [0-7]: ")
 
-        if choice == "s":
+        if choice == "1":
             print("\033[2J\033[H", end="")
-            # Call status directly instead of spawning a subprocess
             from utils.formatter import build_status_report
             print(build_status_report(cfg_path=_config_path_for_daemon()))
             _wait_for_any_key()
-        elif choice == "a":
+        elif choice == "2":
             print("\033[2J\033[H  \033[1mAvailable profiles:\033[0m\n")
             _cmd_profiles(_args)
             prof = _prompt_tty("\n  Enter profile name (or 'q' to cancel) [cosmos-vpn-secure]: ")
-            if not prof or prof.lower() == "q":
-                continue
-            if prof == "": prof = "cosmos-vpn-secure"
-            
-            # Create dummy args for the apply command
+            if not prof or prof.lower() == "q": continue
             apply_args = argparse.Namespace(profile=prof, safe=True)
             _cmd_apply(apply_args)
             _wait_for_any_key()
-        elif choice == "d":
+        elif choice == "3":
             print("\033[2J\033[H", end="")
             doctor_args = argparse.Namespace(profile=None)
             _cmd_doctor(doctor_args)
             _wait_for_any_key()
-        elif choice == "b":
+        elif choice == "4":
             ip = _prompt_tty("\n  Enter IP/CIDR to block (or 'q' to cancel): ")
             if ip and ip.lower() != "q":
                 block_args = argparse.Namespace(ip=ip)
                 _cmd_block(block_args)
                 _wait_for_any_key()
-        elif choice == "u":
+        elif choice == "5":
             ip = _prompt_tty("\n  Enter IP/CIDR to unblock (or 'q' to cancel): ")
             if ip and ip.lower() != "q":
                 unblock_args = argparse.Namespace(ip=ip)
                 _cmd_unblock(unblock_args)
                 _wait_for_any_key()
-        elif choice == "l":
+        elif choice == "6":
             print("\033[2J\033[H", end="")
             _cmd_ip_list(_args)
             _wait_for_any_key()
-        elif choice == "r":
+        elif choice == "7":
             print("\n  \033[34m→\033[0m Restarting nft-watchdog...")
             subprocess.run(["sudo", "systemctl", "restart", "nft-watchdog"], capture_output=True)
             _ok("Done.")
             _wait_for_any_key()
-        elif choice in {"q", "0", "\x1b"}:  # q, 0, or Esc
+        elif choice in {"0", "q", "exit"}:
             print("\033[2J\033[H", end="")
             break
 
