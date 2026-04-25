@@ -54,7 +54,12 @@ cosmos_installed() {
 
 echo "[+] Installing base dependencies..."
 apt-get update
-apt-get install -y curl python3 sudo systemd
+apt-get install -y curl python3 sudo systemd git
+
+echo "[+] Downloading nft-firewall source..."
+INSTALL_TMP=$(mktemp -d /tmp/nft-firewall-install.XXXXXX)
+git clone https://github.com/unknown0152/nft-firewall.git "$INSTALL_TMP"
+cd "$INSTALL_TMP"
 
 echo "[+] Installing nft-firewall..."
 python3 setup.py install
