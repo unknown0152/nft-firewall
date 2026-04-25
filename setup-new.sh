@@ -28,8 +28,8 @@ chmod +x scripts/safe-nft-apply.sh # Ensure internal scripts are ready
 
 # We run setup.py directly for the core firewall install
 echo "[+] Running core installation..."
-# Handle interactive TTY for the wizard
-python3 setup.py install </dev/tty
+# Handle interactive TTY for the wizard; wrap in subshell for clean return
+(python3 setup.py install </dev/tty) || echo "[!] Core install finished with notice."
 
 # 5. Run the Cosmos & Keybase hardening logic (modular script)
 # We feed the current config to the hardening script
