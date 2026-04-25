@@ -27,8 +27,9 @@ Secure-by-default nftables firewall for Debian servers with WireGuard, Docker, a
 This installer changes firewall rules, Docker networking, systemd services, users, groups, and permissions.
 
 Use on a fresh Debian server first. Keep SSH console access available.
-
 ## One-command install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/unknown0152/nft-firewall/main/install.sh | sudo bash
+wget -qO setup.sh https://raw.githubusercontent.com/unknown0152/nft-firewall/main/setup-new.sh && sudo bash setup.sh
+```
+
