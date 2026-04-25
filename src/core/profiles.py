@@ -56,27 +56,27 @@ class Profile:
 
 PROFILES: Dict[str, Profile] = {
     "cosmos-secure": Profile(
-        description    = "Cosmos Cloud reverse proxy + Docker networking + VPN killswitch",
+        description    = "Cosmos Cloud + Docker isolation + VPN killswitch",
         cosmos_enabled = True,
         cosmos_tcp     = [],
         cosmos_udp     = [],
         allow_plex_lan = False,
     ),
     "cosmos-vpn-secure": Profile(
-        description    = "Legacy Cosmos name without Cosmos VPN; use [cosmos] public_ports",
+        description    = "Cosmos Cloud + VPN killswitch + Plex LAN direct play",
         cosmos_enabled = True,
         cosmos_tcp     = [],
         cosmos_udp     = [],
         allow_plex_lan = True,
     ),
     "vpn-only": Profile(
-        description    = "Pure VPN killswitch — no Cosmos, nothing extra",
+        description    = "Pure VPN killswitch (minimal, no Cosmos)",
         cosmos_tcp     = [],
         cosmos_udp     = [],
         allow_plex_lan = False,
     ),
     "media-vpn": Profile(
-        description    = "Media stack + VPN killswitch; reverse proxy via [cosmos] public_ports",
+        description    = "Cosmos Cloud + VPN killswitch + Plex (legacy mapping)",
         cosmos_enabled = True,
         cosmos_tcp     = [],
         cosmos_udp     = [],
