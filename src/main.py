@@ -183,7 +183,7 @@ def _write_watchdog_markers(ruleset_cfg) -> None:
     data = {
         "vpn_iface"  : ruleset_cfg.vpn_interface,
         "ip6_table"  : "killswitch",
-        "output_rule": f'oifname "{ruleset_cfg.vpn_interface}" accept',
+        "output_rule": 'comment "nft-killswitch-output"',
     }
     _MARKERS_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = _MARKERS_FILE.with_suffix(".tmp")
@@ -197,7 +197,20 @@ def _write_watchdog_markers(ruleset_cfg) -> None:
 
 def _die(msg: str) -> None:
     print(f"[error] {msg}", file=sys.stderr)
+    _debug_log(f"FATAL: {msg}")
     sys.exit(1)
+
+
+def _debug_log(msg: str) -> None:
+    """Write a timestamped message to the debug log."""
+    import datetime
+    try:
+        log_path = Path("/var/log/nft-firewall/debug.log")
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
 
 
 def _parse_int(value: str, key: str) -> int:
@@ -836,6 +849,7 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
     import subprocess
     from daemons.watchdog import NftWatchdog
     
+    _debug_log("Menu opened")
     while True:
         # Fetch status for header
         try:
@@ -847,7 +861,8 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
         except PermissionError:
             status_str = "🔒 \033[90mPermission Required\033[0m"
             vpn_str = "🔒 \033[90msudo needed\033[0m"
-        except Exception:
+        except Exception as e:
+            _debug_log(f"Header status error: {e}")
             status_str = "❓ \033[90munknown\033[0m"
             vpn_str = "❓ \033[90munknown\033[0m"
 
@@ -878,19 +893,23 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
         choice = _prompt_tty("  Select an option [0-9]: ")
 
         if choice == "1":
+            _debug_log("Menu: View Status Dashboard")
             print("\033[2J\033[H", end="")
             from utils.formatter import build_status_report
             print(build_status_report(cfg_path=_config_path_for_daemon()))
             _wait_for_any_key()
         elif choice == "2":
+            _debug_log("Menu: Apply rules")
             print("\033[2J\033[H  \033[1mAvailable profiles:\033[0m\n")
             _cmd_profiles(_args)
             prof = _prompt_tty("\n  Enter profile name (or 'q' to cancel) [cosmos-vpn-secure]: ")
             if not prof or prof.lower() == "q": continue
+            _debug_log(f"Menu: Applying profile {prof}")
             apply_args = argparse.Namespace(profile=prof, safe=True)
             _cmd_apply(apply_args)
             _wait_for_any_key()
         elif choice == "3":
+            _debug_log("Menu: Run Doctor")
             print("\033[2J\033[H", end="")
             doctor_args = argparse.Namespace(profile=None)
             _cmd_doctor(doctor_args)
@@ -898,29 +917,36 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
         elif choice == "4":
             ip = _prompt_tty("\n  Enter IP/CIDR to block (or 'q' to cancel): ")
             if ip and ip.lower() != "q":
+                _debug_log(f"Menu: Blocking IP {ip}")
                 block_args = argparse.Namespace(ip=ip)
                 _cmd_block(block_args)
                 _wait_for_any_key()
         elif choice == "5":
             ip = _prompt_tty("\n  Enter IP/CIDR to unblock (or 'q' to cancel): ")
             if ip and ip.lower() != "q":
+                _debug_log(f"Menu: Unblocking IP {ip}")
                 unblock_args = argparse.Namespace(ip=ip)
                 _cmd_unblock(unblock_args)
                 _wait_for_any_key()
         elif choice == "6":
+            _debug_log("Menu: View IP list")
             print("\033[2J\033[H", end="")
             _cmd_ip_list(_args)
             _wait_for_any_key()
         elif choice == "7":
+            _debug_log("Menu: View live logs")
             _menu_live_logs()
         elif choice == "8":
+            _debug_log("Menu: Geo-block manager")
             _menu_geoblock(_args)
         elif choice == "9":
+            _debug_log("Menu: Restart watchdog")
             print("\n  \033[34m→\033[0m Restarting nft-watchdog...")
             subprocess.run(["sudo", "systemctl", "restart", "nft-watchdog"], capture_output=True)
             _ok("Done.")
             _wait_for_any_key()
         elif choice in {"0", "q", "exit"}:
+            _debug_log("Menu: Exit")
             print("\033[2J\033[H", end="")
             break
 
@@ -928,6 +954,7 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
 def _menu_live_logs() -> None:
     """Tails kernel logs for firewall drop events."""
     import os
+    _debug_log("Live logs opened")
     print("\033[2J\033[H")
     print("  \033[1m📊 Live Firewall Activity\033[0m")
     print("  \033[90mWatching for dropped packets and VPN events...\033[0m")
@@ -938,12 +965,14 @@ def _menu_live_logs() -> None:
         # This handles the TTY and colors much better for a live view
         os.system("sudo dmesg -w | grep --line-buffered -E 'nft-.*-drop|VPN'")
     except KeyboardInterrupt:
+        _debug_log("Live logs interrupted by user")
         pass
 
 
 def _menu_geoblock(args: argparse.Namespace) -> None:
     """Sub-menu for managing country blocks."""
     from integrations.geoblock import block_country, unblock_country
+    _debug_log("Geoblock manager opened")
     while True:
         print("\033[2J\033[H")
         print("  \033[1m🌍 Geo-Block Manager\033[0m")
@@ -959,16 +988,17 @@ def _menu_geoblock(args: argparse.Namespace) -> None:
             cc_input = _prompt_tty("\n  Enter Country Code(s) (e.g. CN RU): ").upper()
             if cc_input and cc_input != "Q":
                 for cc in cc_input.split():
-                    print(f"\n  \033[34m→\033[0m Downloading and blocking {cc}...")
+                    _debug_log(f"Geoblock: Blocking country {cc}")
                     block_country(cc)
                 _wait_for_any_key()
         elif choice == "2":
             cc = _prompt_tty("\n  Enter Country Code to unblock: ").upper()
             if cc and cc != "Q":
-                print(f"\n  \033[34m→\033[0m Removing blocks for {cc}...")
+                _debug_log(f"Geoblock: Unblocking country {cc}")
                 unblock_country(cc)
                 _wait_for_any_key()
         elif choice == "0" or choice.lower() == "q":
+            _debug_log("Geoblock manager closed")
             break
 
 

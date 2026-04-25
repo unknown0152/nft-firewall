@@ -819,6 +819,7 @@ case "${1:-}" in
       ruleset) exec /usr/sbin/nft list ruleset ;;
       set) [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in blocked_ips|trusted_ips|dk_ips) exec /usr/sbin/nft "$@" ;; esac ;;
       chain) [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in input|output|forward) exec /usr/sbin/nft "$@" ;; esac ;;
+      tables) [ "${3:-}" = "ip6" ] && exec /usr/sbin/nft "$@" ;;
     esac
     ;;
   add|delete)

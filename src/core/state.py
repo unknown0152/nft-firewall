@@ -349,61 +349,91 @@ def restore_ruleset(
 # ── Dynamic set modifiers ─────────────────────────────────────────────────────
 
 def set_add(set_name: str, ip: str) -> bool:
-    """Add an IP address to a live nftables set without reloading the ruleset.
-
-    Parameters
-    ----------
-    set_name:
-        Name of the set in the ``ip firewall`` table (e.g. ``"blocked_ips"``).
-    ip:
-        IPv4 address or CIDR prefix to add.
-
-    Returns
-    -------
-    bool
-        ``True`` on success, ``False`` if ``nft`` returned an error.
-    """
-    set_name = _canonical_set_name(set_name)
-    result = subprocess.run(
-        ["nft", "add", "element", "ip", "firewall", set_name, "{", ip, "}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"[state] WARNING: nft add element {set_name} {ip}: "
-              f"{(result.stderr or result.stdout).strip()}")
-        return False
-    persist_set_member(set_name, ip, present=True)
-    return True
+    """Add an IP address to a live nftables set without reloading the ruleset."""
+    return set_add_bulk(set_name, [ip]) == 1
 
 
-def set_del(set_name: str, ip: str) -> bool:
-    """Remove an IP address from a live nftables set.
+def set_add_bulk(set_name: str, ips: list[str]) -> int:
+    """Add multiple IP addresses to a live nftables set efficiently.
 
     Parameters
     ----------
     set_name:
         Name of the set in the ``ip firewall`` table.
-    ip:
-        IPv4 address or CIDR prefix to remove.
+    ips:
+        List of IPv4 addresses or CIDR prefixes to add.
 
     Returns
     -------
-    bool
-        ``True`` on success, ``False`` if ``nft`` returned an error.
+    int
+        Number of elements successfully added.
     """
+    if not ips:
+        return 0
     set_name = _canonical_set_name(set_name)
-    result = subprocess.run(
-        ["nft", "delete", "element", "ip", "firewall", set_name, "{", ip, "}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"[state] WARNING: nft delete element {set_name} {ip}: "
-              f"{(result.stderr or result.stdout).strip()}")
-        return False
-    persist_set_member(set_name, ip, present=False)
-    return True
+
+    # Use a temporary file to avoid shell argument length limits
+    elements = ", ".join(ips)
+    script = f"add element ip firewall {set_name} {{ {elements} }}\n"
+
+    tmp: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False) as fh:
+            fh.write(script)
+            tmp = Path(fh.name)
+
+        result = subprocess.run(["nft", "-f", str(tmp)], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"[state] WARNING: bulk add to {set_name} failed: {result.stderr.strip()}")
+            return 0
+
+        # Update persistence
+        sets = load_persistent_sets()
+        members = set(sets.get(set_name, []))
+        members.update(ips)
+        sets[set_name] = sorted(members)
+        save_persistent_sets(sets)
+        return len(ips)
+    finally:
+        if tmp and tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
+def set_del(set_name: str, ip: str) -> bool:
+    """Remove an IP address from a live nftables set."""
+    return set_del_bulk(set_name, [ip]) == 1
+
+
+def set_del_bulk(set_name: str, ips: list[str]) -> int:
+    """Remove multiple IP addresses from a live nftables set efficiently."""
+    if not ips:
+        return 0
+    set_name = _canonical_set_name(set_name)
+
+    elements = ", ".join(ips)
+    script = f"delete element ip firewall {set_name} {{ {elements} }}\n"
+
+    tmp: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False) as fh:
+            fh.write(script)
+            tmp = Path(fh.name)
+
+        result = subprocess.run(["nft", "-f", str(tmp)], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"[state] WARNING: bulk delete from {set_name} failed: {result.stderr.strip()}")
+            return 0
+
+        sets = load_persistent_sets()
+        members = set(sets.get(set_name, []))
+        for ip in ips:
+            members.discard(ip)
+        sets[set_name] = sorted(members)
+        save_persistent_sets(sets)
+        return len(ips)
+    finally:
+        if tmp and tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def set_list(set_name: str, *, persistent_fallback: bool = True) -> List[str]:

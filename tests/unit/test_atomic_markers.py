@@ -31,7 +31,7 @@ def test_json_content_is_correct(tmp_path, monkeypatch):
     data = json.loads(markers_file.read_text())
     assert data["vpn_iface"] == "wg0"
     assert data["ip6_table"] == "killswitch"
-    assert data["output_rule"] == 'oifname "wg0" accept'
+    assert data["output_rule"] == 'comment "nft-killswitch-output"'
 
 
 def test_permissions_are_644(tmp_path, monkeypatch):
