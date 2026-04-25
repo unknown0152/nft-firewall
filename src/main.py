@@ -53,8 +53,12 @@ def _config_candidates() -> List[Path]:
 def _active_config_path() -> Optional[Path]:
     """Return the first readable config path candidate, if any."""
     for path in _config_candidates():
-        if path.exists():
-            return path
+        try:
+            if path.exists():
+                return path
+        except OSError:
+            # Handle cases where user lacks permission to stat the path
+            continue
     return None
 
 
@@ -834,12 +838,15 @@ def _cmd_menu(_args: argparse.Namespace) -> None:
     
     while True:
         # Fetch status for header
-        wd = NftWatchdog(config_path=_config_path_for_daemon())
         try:
+            wd = NftWatchdog(config_path=_config_path_for_daemon())
             h = wd.health()
             status_str = f"🟢 \033[32mHEALTHY\033[0m" if h["status"] == "HEALTHY" else f"🔴 \033[31m{h['status']}\033[0m"
             vpn_ip = h.get("vpn_ip", "none")
             vpn_str = f"🟢 \033[32m{vpn_ip}\033[0m" if vpn_ip != "none" else "🔴 \033[31moffline\033[0m"
+        except PermissionError:
+            status_str = "🔒 \033[90mPermission Required\033[0m"
+            vpn_str = "🔒 \033[90msudo needed\033[0m"
         except Exception:
             status_str = "❓ \033[90munknown\033[0m"
             vpn_str = "❓ \033[90munknown\033[0m"
