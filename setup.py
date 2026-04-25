@@ -217,17 +217,27 @@ _CONF_FILE = _CONF_DIR / "firewall.ini"
 def _ask(label: str, default: str = "", hint: str = "") -> str:
     """Prompt for a value; pressing Enter accepts the default.
 
-    If a default was detected it is shown in brackets.  The hint (e.g. an
-    example value) is only shown when there is no detected default.
+    Always reads from /dev/tty to support piped installation (curl | bash).
     """
     shown = default if default else hint
     suffix = f" \033[90m[{shown}]\033[0m" if shown else ""
+
+    # Print the prompt manually since we are opening the tty
+    print(f"  {label}{suffix}: ", end="", flush=True)
+
     try:
-        val = input(f"  {label}{suffix}: ").strip()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        sys.exit(0)
-    return val or default
+        with open("/dev/tty", "r") as tty:
+            val = tty.readline().strip()
+    except (KeyboardInterrupt, EOFError, OSError):
+        # Fallback to standard input if /dev/tty is not available
+        try:
+            val = input().strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            sys.exit(1)
+
+    return val if val else default
+
 
 
 def _ask_ports(label: str, default: str = "") -> str:
