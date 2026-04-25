@@ -219,14 +219,29 @@ def _exposed_port_lines() -> List[str]:
 # ── Main builder ──────────────────────────────────────────────────────────────
 
 def _blocked_geo_summary() -> str:
-    """Return '<N> blocked — top: 🇨🇳 CN (8)' or 'none' if block list is empty."""
+    """Return '<N> blocked — top: 🇨🇳 CN (8)' or 'none' if block list is empty.
+    
+    Uses pre-calculated geoblock state to stay instant even with 10k+ IPs.
+    """
     try:
-        from utils.analytics import read_blocked_ips, top_country_label
+        from integrations.geoblock import list_blocked
+        from utils.analytics import country_flag, read_blocked_ips
+        
+        # Get total count from live nft (very fast)
         n = len(read_blocked_ips())
         if n == 0:
             return "none blocked"
-        top = top_country_label()
-        return f"{n} blocked — top: {top}"
+            
+        # Get country breakdown from state (instant)
+        stats = list_blocked()
+        if not stats:
+            return f"{n} blocked"
+            
+        # Find top blocked country from our state
+        top_cc = max(stats, key=stats.get)
+        top_count = stats[top_cc]
+        
+        return f"{n} blocked — top: {country_flag(top_cc)} {top_cc} ({top_count})"
     except Exception:
         return "—"
 

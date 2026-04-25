@@ -263,8 +263,22 @@ def chain_drop_counter(chain: str) -> int:
 
 
 def total_drop_packets() -> int:
-    """Return total DROP packet count across input + output + forward chains."""
-    return sum(chain_drop_counter(c) for c in ("input", "output", "forward"))
+    """Return total DROP packet count across input + output + forward chains.
+    
+    Uses a single nft call to list the entire table for better performance.
+    """
+    try:
+        r = subprocess.run(
+            _sudo_nft_args("list", "table", "ip", "firewall"),
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return 0
+        # Sum all 'counter packets N' occurrences in the entire table
+        counts = re.findall(r"counter packets (\d+)", r.stdout)
+        return sum(int(n) for n in counts)
+    except Exception:
+        return 0
 
 
 # ── Weekly ban summary ────────────────────────────────────────────────────────

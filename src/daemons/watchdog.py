@@ -510,27 +510,24 @@ class NftWatchdog:
 
     def _check_nftables_integrity(self, iface: str) -> Tuple[bool, str]:
         """Verify that the killswitch markers are present in the live ruleset.
-
-        Returns
-        -------
-        tuple[bool, str]
-            ``(True, "")`` if OK or markers not loaded (skipped),
-            ``(False, reason)`` if a marker is missing from ``nft list ruleset``.
+        
+        Optimized to check specific chains instead of listing the entire ruleset.
         """
         if not self._markers:
             return False, "markers not loaded; cannot verify killswitch integrity"
 
-        ok, out, _ = self._run(["nft", "list", "ruleset"])
-        if not ok:
-            return False, "missing: nft list ruleset command failed"
-
+        # 1. Check OUTPUT chain for our marker
         output_marker = str(self._markers.get("output_rule", "")).strip()
-        if output_marker and output_marker not in out:
-            return False, f"missing: OUTPUT rule marker '{output_marker}'"
+        if output_marker:
+            ok, out, _ = self._run(["nft", "list", "chain", "ip", "firewall", "output"])
+            if not ok or output_marker not in out:
+                return False, f"missing: OUTPUT rule marker in 'ip firewall output'"
 
+        # 2. Check for IPv6 killswitch table
         ip6_table = str(self._markers.get("ip6_table", "")).strip()
         if ip6_table:
-            if not re.search(rf"table\s+ip6\s+{re.escape(ip6_table)}\b", out):
+            ok, out, _ = self._run(["nft", "list", "tables", "ip6"])
+            if not ok or not re.search(rf"\btable\s+ip6\s+{re.escape(ip6_table)}\b", out):
                 return False, f"missing: ip6 killswitch table '{ip6_table}'"
 
         return True, ""
