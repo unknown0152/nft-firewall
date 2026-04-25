@@ -62,7 +62,7 @@ git clone https://github.com/unknown0152/nft-firewall.git "$INSTALL_TMP"
 cd "$INSTALL_TMP"
 
 echo "[+] Installing nft-firewall..."
-python3 setup.py install
+python3 setup.py install </dev/tty
 
 echo "[+] Installing or hardening Cosmos..."
 
