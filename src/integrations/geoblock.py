@@ -224,7 +224,7 @@ def clear_geowhitelist() -> None:
     if SET_WHITELIST in sets:
         sets[SET_WHITELIST] = []
         save_persistent_sets(sets)
-    _ok("Lockdown Mode disabled.")
+    print(f"  \033[32m✓\033[0m Lockdown Mode disabled.")
 
 
 def list_blocked() -> "dict[str, int]":
