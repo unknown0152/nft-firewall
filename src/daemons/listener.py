@@ -300,10 +300,19 @@ class KeybaseListener:
                 if content.get("type") != "text":
                     continue
                 body = content.get("text", {}).get("body", "").strip()
-                if not body:
+                if not body or not body.startswith("!"):
                     continue
+                
+                sender = msg.get("sender", {}).get("username", "")
+                
+                # CRITICAL: Ignore our own messages to prevent loops (local echo)
+                try:
+                    if sender == subprocess.check_output(["keybase", "whoami"], text=True).strip():
+                        continue
+                except: pass
+
                 event = {
-                    "sender" : msg.get("sender", {}).get("username", ""),
+                    "sender" : sender,
                     "body"   : body,
                     "channel": msg.get("channel", channel),
                 }
