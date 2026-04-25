@@ -919,24 +919,28 @@ def step5_deploy_services() -> None:
         _die(f"No .service or .timer files found in {SYSTEMD_SRC}")
 
     for src in unit_files:
-        raw = src.read_text()
-        if src.name in _ROOT_UNITS:
-            # Apply all patches EXCEPT User= so User=root is preserved
-            patched_lines = []
-            for line in raw.splitlines(keepends=True):
-                stripped = line.rstrip("\n")
-                for pattern, replacement in _PATCHES:
-                    if "User=" in pattern:
-                        continue
-                    stripped = re.sub(pattern, replacement, stripped)
-                patched_lines.append(stripped + ("\n" if line.endswith("\n") else ""))
-            patched = "".join(patched_lines)
-        else:
-            patched = _patch_unit(raw)
-        dst = SYSTEMD_DST / src.name
-        dst.write_text(patched)
-        dst.chmod(0o644)
-        _ok(f"Deployed {src.name}  →  {dst}")
+        try:
+            raw = src.read_text()
+            if src.name in _ROOT_UNITS:
+                # Apply all patches EXCEPT User= so User=root is preserved
+                patched_lines = []
+                for line in raw.splitlines(keepends=True):
+                    stripped = line.rstrip("\n")
+                    for pattern, replacement in _PATCHES:
+                        if "User=" in pattern:
+                            continue
+                        stripped = re.sub(pattern, replacement, stripped)
+                    patched_lines.append(stripped + ("\n" if line.endswith("\n") else ""))
+                patched = "".join(patched_lines)
+            else:
+                patched = _patch_unit(raw)
+            dst = SYSTEMD_DST / src.name
+            dst.write_text(patched)
+            dst.chmod(0o644)
+            _ok(f"Deployed {src.name}  →  {dst}")
+        except Exception as e:
+            _warn(f"Failed to deploy {src.name}: {e} — skipping")
+            _debug_log(f"Systemd deploy error ({src.name}): {e}")
 
 
 # ── Step 6: Reload & restart ──────────────────────────────────────────────────

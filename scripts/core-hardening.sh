@@ -106,5 +106,10 @@ echo "[+] Finalizing verification..."
 if command -v fw >/dev/null 2>&1; then
   # Fetch profile from config if possible
   PROF=$(grep "profile =" /opt/nft-firewall/config/firewall.ini | cut -d'=' -f2 | xargs || echo "cosmos-vpn-secure")
+  
+  echo "[+] Activating firewall rules for profile: $PROF..."
+  # Use non-safe apply for first-time activation to ensure the dashboard turns green
+  sudo fw apply "$PROF" || true
+  
   fw doctor "$PROF" || true
 fi
