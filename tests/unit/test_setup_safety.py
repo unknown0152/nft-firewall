@@ -42,3 +42,46 @@ def test_firewall_threatfeed_service_uses_real_cli_command():
 
     assert "ExecStart=/usr/local/bin/fw threat-update" in text
     assert "threatfeed update" not in text
+
+
+def test_uninstall_flushes_live_ruleset(monkeypatch):
+    import setup
+
+    calls = []
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: calls.append(tuple(cmd)))
+    monkeypatch.setattr(setup, "_ok",   lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "_info", lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "shutil", type("S", (), {"rmtree": lambda *a: None})())
+
+    import pathlib
+    monkeypatch.setattr(setup, "INSTALL_DIR",  type("P", (), {"exists": lambda s: False})())
+    monkeypatch.setattr(setup, "SUDOERS_FILE", type("P", (), {"exists": lambda s: False})())
+    monkeypatch.setattr(pathlib.Path, "exists", lambda s: False)
+
+    setup.cmd_uninstall()
+
+    flush_call = ("/usr/sbin/nft", "flush", "ruleset")
+    assert flush_call in calls, f"nft flush ruleset not called; calls={calls}"
+
+
+def test_uninstall_flushes_before_stopping_services(monkeypatch):
+    import setup
+
+    calls = []
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: calls.append(tuple(cmd)))
+    monkeypatch.setattr(setup, "_ok",   lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "_info", lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "shutil", type("S", (), {"rmtree": lambda *a: None})())
+
+    import pathlib
+    monkeypatch.setattr(setup, "INSTALL_DIR",  type("P", (), {"exists": lambda s: False})())
+    monkeypatch.setattr(setup, "SUDOERS_FILE", type("P", (), {"exists": lambda s: False})())
+    monkeypatch.setattr(pathlib.Path, "exists", lambda s: False)
+
+    setup.cmd_uninstall()
+
+    flush_idx = next(i for i, c in enumerate(calls) if c == ("/usr/sbin/nft", "flush", "ruleset"))
+    systemctl_indices = [i for i, c in enumerate(calls) if c[0] == "systemctl"]
+    assert all(flush_idx < s for s in systemctl_indices), (
+        f"flush (idx={flush_idx}) must precede all systemctl calls (idx={systemctl_indices})"
+    )

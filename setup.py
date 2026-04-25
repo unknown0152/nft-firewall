@@ -983,6 +983,11 @@ def cmd_status() -> None:
 def cmd_uninstall() -> None:
     _header("Uninstall")
 
+    # Flush live ruleset first — kernel default (no tables) is ACCEPT on all hooks.
+    # Must happen before stopping the watchdog so the box stays reachable.
+    _run(["/usr/sbin/nft", "flush", "ruleset"], check=False)
+    _ok("nft flush ruleset — live rules cleared")
+
     all_units = (
         [f"{s}.service" for s in ACTIVE_SERVICES]
         + [f"{t}.timer" for t in TIMERS]
