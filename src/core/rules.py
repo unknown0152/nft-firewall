@@ -460,10 +460,10 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
 
     # LOCKDOWN MODE: If geowhitelist is not empty, drop EVERYTHING ELSE from internet
     if cfg.geowhitelist_ips:
-    a("        # LOCKDOWN MODE: Only allow specific countries from internet.")
-    a(f"        {PHY} ip saddr @geowhitelist_ips accept comment \"Lockdown: Country Whitelist\"")
-    a(f"        {PHY} ip saddr != {cfg.lan_net} drop comment \"Lockdown: Non-whitelisted country drop\"")
-    a("")
+        a("        # LOCKDOWN MODE: Only allow specific countries from internet.")
+        a(f"        {PHY} ip saddr @geowhitelist_ips accept comment \"Lockdown: Country Whitelist\"")
+        a(f"        {PHY} ip saddr != {cfg.lan_net} drop comment \"Lockdown: Non-whitelisted country drop\"")
+        a("")
 
     a("        # Trusted admin IPs — SSH override (before LAN/VPN restriction)")
 
