@@ -176,6 +176,20 @@ fi
 echo "[+] Enabling nftables service..."
 systemctl enable --now nftables || true
 
+echo "[+] Optional: Keybase ChatOps setup"
+read -p "  Would you like to install Keybase for ChatOps? [y/N]: " install_kb
+if [[ "$install_kb" =~ ^[Yy]$ ]]; then
+  echo "[+] Downloading Keybase..."
+  curl -O https://prerelease.keybase.io/keybase_amd64.deb
+  echo "[+] Installing Keybase dependencies..."
+  apt-get update
+  apt-get install -y ./keybase_amd64.deb
+  rm keybase_amd64.deb
+  echo "[!] Keybase installed. IMPORTANT: You must log in manually to enable ChatOps:"
+  echo "    1. Run: keybase login"
+  echo "    2. Then run: fw menu (Option 0) to restart the listener"
+fi
+
 echo "[+] Reloading systemd..."
 systemctl daemon-reload
 
