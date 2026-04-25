@@ -24,6 +24,57 @@ def _rules(public_ports=None):
     return generate_ruleset(cfg)
 
 
+def test_legacy_cosmos_tcp_is_bound_to_vpn_interface():
+    cfg = RulesetConfig(
+        phy_if="eth0",
+        vpn_interface="wg0",
+        vpn_server_ip="198.51.100.10",
+        vpn_server_port="51820",
+        cosmos_tcp=[80, 443],
+    )
+    ruleset = generate_ruleset(cfg)
+
+    assert 'iifname "wg0" tcp dport { 80, 443 } accept' in ruleset
+    assert 'iifname "eth0" tcp dport { 80, 443 } accept' not in ruleset
+    assert "tcp dport { 80, 443 } accept" not in ruleset.replace(
+        'iifname "wg0" tcp dport { 80, 443 } accept', ""
+    )
+
+
+def test_legacy_cosmos_udp_is_bound_to_vpn_interface():
+    cfg = RulesetConfig(
+        phy_if="eth0",
+        vpn_interface="wg0",
+        vpn_server_ip="198.51.100.10",
+        vpn_server_port="51820",
+        cosmos_udp=[4242],
+    )
+    ruleset = generate_ruleset(cfg)
+
+    assert 'iifname "wg0" udp dport { 4242 } accept' in ruleset
+    assert 'iifname "eth0" udp dport { 4242 } accept' not in ruleset
+    assert "udp dport { 4242 } accept" not in ruleset.replace(
+        'iifname "wg0" udp dport { 4242 } accept', ""
+    )
+
+
+def test_legacy_cosmos_tcp_and_udp_never_appear_on_physical_interface():
+    cfg = RulesetConfig(
+        phy_if="enp88s0",
+        vpn_interface="wg0",
+        vpn_server_ip="198.51.100.10",
+        vpn_server_port="51820",
+        cosmos_tcp=[80, 443],
+        cosmos_udp=[4242],
+    )
+    ruleset = generate_ruleset(cfg)
+
+    assert 'iifname "enp88s0" tcp dport { 80, 443 } accept' not in ruleset
+    assert 'iifname "enp88s0" udp dport { 4242 } accept' not in ruleset
+    assert 'iifname "wg0" tcp dport { 80, 443 } accept' in ruleset
+    assert 'iifname "wg0" udp dport { 4242 } accept' in ruleset
+
+
 def test_cosmos_secure_profile_does_not_open_cosmos_vpn_port():
     profile = get_profile("cosmos-secure")
     ruleset = _rules([80, 443])
@@ -294,7 +345,7 @@ def test_published_container_port_is_allowed_when_listed_in_firewall_config():
 def test_container_killswitch_remains_enforced_for_forwarding():
     ruleset = _rules([80, 443])
 
-    assert 'ip saddr @docker_nets oifname "eth0" ct state new drop' in ruleset
+    assert 'ip saddr @docker_nets oifname "eth0" drop' in ruleset
     assert 'ip saddr @docker_nets oifname "wg0" accept' in ruleset
     assert '        oifname "wg0" accept  # container internet ONLY via VPN' not in ruleset
 
@@ -305,3 +356,26 @@ def test_ssh_rules_remain_protected():
     assert 'iifname "eth0" ip saddr 192.168.1.0/24 tcp dport 22 accept' in ruleset
     assert 'iifname "eth0" tcp dport 22 drop' in ruleset
     assert 'iifname "wg0" tcp dport 22 drop' in ruleset
+
+
+def test_output_dhcp_is_restricted_to_sport_68():
+    ruleset = _rules([80, 443])
+
+    assert "udp sport 68 udp dport 67 accept" in ruleset
+    assert "udp dport 67 accept" not in ruleset.replace("udp sport 68 udp dport 67 accept", "")
+
+
+def test_container_to_phy_is_hard_dropped_for_all_states():
+    ruleset = _rules([80, 443])
+
+    assert 'ip saddr @docker_nets oifname "eth0" drop' in ruleset
+    assert 'ip saddr @docker_nets oifname "eth0" ct state new drop' not in ruleset
+
+
+def test_container_dnat_replies_to_lan_are_allowed():
+    ruleset = _rules([80, 443])
+
+    assert (
+        'ip saddr @docker_nets oifname "eth0" ip daddr 192.168.1.0/24 '
+        'ct state established,related accept'
+    ) in ruleset

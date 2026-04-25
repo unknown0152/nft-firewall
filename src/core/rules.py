@@ -486,10 +486,10 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     if cfg.cosmos_tcp or cfg.cosmos_udp:
         a("        # Legacy host-bound Cosmos ports (--network host, no DNAT needed)")
         if cfg.cosmos_tcp:
-            a(f"        tcp dport {_pset(cfg.cosmos_tcp)} accept"
+            a(f"        {VPN} tcp dport {_pset(cfg.cosmos_tcp)} accept"
               "   # Cosmos reverse proxy")
         if cfg.cosmos_udp:
-            a(f"        udp dport {_pset(cfg.cosmos_udp)} accept"
+            a(f"        {VPN} udp dport {_pset(cfg.cosmos_udp)} accept"
               "   # Legacy UDP exposure")
         a("")
 
@@ -539,7 +539,7 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a("        type filter hook output priority filter; policy drop;")
     a("")
     a('        oifname "lo" accept')
-    a(f"        {OPH} udp dport 67 accept                              # DHCP broadcast + renewal")
+    a(f"        {OPH} udp sport 68 udp dport 67 accept                # DHCP client only (sport 68)")
     a("        ct state invalid drop")
     a("")
     a("        # Block outbound to blocked IPs (even if they were trusted)")
@@ -572,13 +572,13 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a("")
     a("        ct state invalid drop")
     a("")
-    a(f"        # Prevents containers from initiating NEW connections via PHY.")
-    a(f"        # Scoped to ct state new only — DNAT return traffic (established)")
-    a(f"        # must be allowed through for inbound container services (e.g. Plex).")
-    a(f"        # Without ct state new: reply packets from 172.16.x.x → enp88s0")
-    a(f"        # are dropped before the ct established rule can accept them.")
-    a(f"        ip saddr @docker_nets {OPH} ct state new drop"
-      "  # containers cannot initiate PHY connections")
+    a(f"        # DNAT replies to LAN (e.g. Plex) are established-state; allow those only.")
+    a(f"        # All other container→PHY traffic is hard-dropped regardless of ct state,")
+    a(f"        # closing the VPN-escape path for established connections.")
+    a(f"        ip saddr @docker_nets {OPH} ip daddr {cfg.lan_net} ct state established,related accept"
+      "  # DNAT replies to LAN")
+    a(f"        ip saddr @docker_nets {OPH} drop"
+      "  # hard drop: containers cannot egress PHY (any state)")
     a("")
     a("        ct state established,related accept")
     a("")
