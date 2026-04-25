@@ -42,9 +42,20 @@ from typing import List, Optional, Tuple
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 
+def _detect_admin_user() -> str:
+    """Return the primary non-root user (SUDO_USER or first UID >= 1000)."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and sudo_user != "root":
+        return sudo_user
+
+    for pw in pwd.getpwall():
+        if pw.pw_uid >= 1000 and pw.pw_name != "nobody":
+            return pw.pw_name
+    return "admin"
+
 SYSTEM_USER        = "fw-admin"
 LEGACY_SYSTEM_USER = "nft-firewall"
-ADMIN_USER         = "nuc"
+ADMIN_USER         = _detect_admin_user()
 MEDIA_USER         = "media"
 BACKUP_USER        = "backup"
 DEPLOY_USER        = "deploy"

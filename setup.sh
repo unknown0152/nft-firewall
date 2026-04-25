@@ -3,7 +3,14 @@ set -euo pipefail
 
 FW_USER="fw-admin"
 LEGACY_FW_USER="nft-firewall"
-ADMIN_USER="nuc"
+
+# Detect primary non-root user
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+  ADMIN_USER="${SUDO_USER}"
+else
+  ADMIN_USER=$(awk -F: '$3>=1000 && $1!="nobody"{print $1; exit}' /etc/passwd || echo "admin")
+fi
+
 MEDIA_USER="media"
 BACKUP_USER="backup"
 DEPLOY_USER="deploy"

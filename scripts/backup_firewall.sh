@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # backup_firewall.sh — Archive the entire nft-firewall project folder.
 #
-# Creates:  /home/nuc/backups/nft-firewall-YYYY-MM-DD_HHMMSS.tar.gz
+# Creates:  ./backups/nft-firewall-YYYY-MM-DD_HHMMSS.tar.gz
 # Usage:    bash backup_firewall.sh
 #           bash backup_firewall.sh /path/to/custom/output/dir
 
 set -euo pipefail
 
-SOURCE_DIR="${SOURCE_DIR:-/home/nuc/nft-firewall}"
-OUTPUT_DIR="${1:-/home/nuc/backups}"
+# Find project root relative to this script (scripts/backup_firewall.sh)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+SOURCE_DIR="${SOURCE_DIR:-${ROOT_DIR}}"
+OUTPUT_DIR="${1:-${ROOT_DIR}/backups}"
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
 ARCHIVE_NAME="nft-firewall-${TIMESTAMP}.tar.gz"
 DEST="${OUTPUT_DIR}/${ARCHIVE_NAME}"
