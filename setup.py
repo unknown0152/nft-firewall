@@ -96,7 +96,21 @@ def _die(msg: str) -> None:
 def _run(cmd: List[str], check: bool = True, **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, check=check, **kw)
 
+
+def _debug_log(msg: str) -> None:
+    """Write a timestamped message to the debug log."""
+    import datetime
+    try:
+        log_path = Path("/var/log/nft-firewall/debug.log")
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
+
+
 def _require_root() -> None:
+
     if os.geteuid() != 0:
         _die("Must run as root:  sudo python3 setup.py install")
 
