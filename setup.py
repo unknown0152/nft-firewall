@@ -239,7 +239,6 @@ def _ask(label: str, default: str = "", hint: str = "") -> str:
     return val if val else default
 
 
-
 def _ask_ports(label: str, default: str = "") -> str:
     """Prompt for a comma-separated list of ports; validate each entry."""
     while True:
@@ -327,6 +326,11 @@ def _detect_ssh_port() -> str:
 def _detect_keybase_linux_user() -> str:
     """Find a Linux user that has a Keybase config directory."""
     try:
+        # Check primary admin user first
+        admin_home = Path(f"/home/{ADMIN_USER}")
+        if (admin_home / ".config" / "keybase").is_dir():
+            return ADMIN_USER
+            
         for home in sorted(Path("/home").iterdir()):
             if (home / ".config" / "keybase").is_dir():
                 return home.name
@@ -508,7 +512,7 @@ def step0_configure(reconfigure: bool = False) -> None:
         print(f"    Keybase    : {kb_team}#{kb_channel}  (linux: {kb_linux_user})")
 
 
-# ── Step 1: System user ───────────────────────────────────────────────────────
+# ── Step 1: User model ────────────────────────────────────────────────────────
 
 def step1_create_system_user() -> None:
     """Create and normalize the nft-firewall host user model."""
@@ -933,15 +937,6 @@ def step5_deploy_services() -> None:
         dst.write_text(patched)
         dst.chmod(0o644)
         _ok(f"Deployed {src.name}  →  {dst}")
-
-
-# ── Step 7: Apply ruleset (writes watchdog-markers.json) ─────────────────────
-
-def step7_apply_ruleset() -> None:
-    """Deprecated: setup must not apply live firewall rules automatically."""
-    _header("Step 7 — Apply Ruleset")
-    _warn("Skipped: setup never applies live firewall rules.")
-    _info("Run 'sudo fw doctor' first, then 'sudo fw safe-apply <profile>' when ready.")
 
 
 # ── Step 6: Reload & restart ──────────────────────────────────────────────────
