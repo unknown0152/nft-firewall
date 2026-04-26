@@ -226,13 +226,34 @@ def clear_geowhitelist() -> None:
     print(f"  \033[32m✓\033[0m Lockdown Mode disabled.")
 
 
-def list_blocked() -> "dict[str, int]":
+def list_blocked() -> Dict[str, int]:
     """Return a summary of currently blocked countries and their CIDR counts."""
     state = _load_state()
     return {cc: len(cidrs) for cc, cidrs in state.items()}
 
 
+def get_status() -> Dict:
+    """Return technical status of the geoblock integration."""
+    state = _load_state()
+
+    # Calculate cache info
+    cache_files = list(_CACHE_DIR.glob("*.zone"))
+    newest_cache = 0.0
+    if cache_files:
+        newest_cache = max(f.stat().st_mtime for f in cache_files)
+
+    return {
+        "state_file": str(_STATE_FILE),
+        "cache_dir": str(_CACHE_DIR),
+        "blocked_countries": list(state.keys()),
+        "total_cidrs": sum(len(cidrs) for cidrs in state.values()),
+        "cache_count": len(cache_files),
+        "newest_cache_age_seconds": time.time() - newest_cache if newest_cache else None,
+    }
+
+
 def get_total_cidr_count() -> int:
+
     """Return the total number of CIDRs blocked across all countries."""
     state = _load_state()
     return sum(len(cidrs) for cidrs in state.values())

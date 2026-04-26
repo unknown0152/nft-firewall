@@ -505,11 +505,57 @@ def _cmd_geolist(_args: argparse.Namespace) -> None:
     blocked = list_blocked()
     if not blocked:
         print("  No countries currently geo-blocked.")
-        return
-    print(f"\n  {'COUNTRY':<10} {'CIDRs':>6}")
-    print(f"  {'-'*9:<10} {'-'*5:>6}")
-    for cc, count in sorted(blocked.items()):
-        print(f"  {cc:<10} {count:>6}")
+    else:
+        print(f"  {'Country':<10} {'CIDRs':>6}")
+        print("  " + "─" * 17)
+        for cc, count in sorted(blocked.items()):
+            print(f"  {cc:<10} {count:>6}")
+
+
+def _cmd_geoblock_status(_args: argparse.Namespace) -> None:
+    """geoblock-status — technical details of the geoblock integration."""
+    from integrations.geoblock import get_status
+    import time
+
+    s = get_status()
+    print("  \033[1mGeo-Block Integration Status\033[0m")
+    print("  " + "─" * 40)
+    print(f"  State file   : {s['state_file']}")
+    print(f"  Cache dir    : {s['cache_dir']}")
+    print(f"  Blocked      : {len(s['blocked_countries'])} countries ({s['total_cidrs']} CIDRs)")
+    print(f"  Cache count  : {s['cache_count']} files")
+
+    age = s['newest_cache_age_seconds']
+    if age is None:
+        age_str = "never"
+    elif age < 60:
+        age_str = f"{int(age)}s ago"
+    elif age < 3600:
+        age_str = f"{int(age//60)}m ago"
+    else:
+        age_str = f"{int(age//3600)}h ago"
+    print(f"  Newest cache : {age_str}")
+
+
+def _cmd_set_stats(_args: argparse.Namespace) -> None:
+    """set-stats — show element counts for dynamic nftables sets."""
+    from core import state
+
+    sets = {
+        "Blocked IPs":     state.SET_BLOCKED,
+        "Trusted IPs":     state.SET_TRUSTED,
+        "Geo Whitelist":   state.SET_WHITELIST,
+        "Knockd IPs":      state.SET_DK,
+    }
+
+    print(f"  {'Set Name':<15} {'Elements':>10}")
+    print("  " + "─" * 26)
+
+    for label, set_name in sets.items():
+        # Using set_list with persistent_fallback=False gets live counts
+        count = len(state.set_list(set_name, persistent_fallback=False))
+        print(f"  {label:<15} {count:>10}")
+
     print()
 
 
@@ -608,15 +654,21 @@ def _cmd_profiles(_args: argparse.Namespace) -> None:
         print()
 
 
-def _cmd_rules(_args: argparse.Namespace) -> None:
+def _cmd_rules(args: argparse.Namespace) -> None:
     import subprocess
+    import re
     try:
         result = subprocess.run(["nft", "list", "ruleset"],
                                 capture_output=True, text=True)
     except OSError as exc:
         _die(f"Failed to run 'nft': {exc}")
     if result.returncode == 0:
-        print(result.stdout)
+        out = result.stdout
+        if args.no_sets:
+            # Strip large elements = { ... } blocks
+            # We match 'elements = { ... }' non-greedily across multiple lines
+            out = re.sub(r'elements\s*=\s*\{.*?\}', 'elements = { ... }', out, flags=re.DOTALL)
+        print(out)
     else:
         _die(f"nft list ruleset failed: {result.stderr.strip()}")
 
@@ -730,11 +782,11 @@ def _cmd_logs(_args: argparse.Namespace) -> None:
     cmd = (
         "journalctl -u nft-watchdog -u nft-ssh-alert -u wg-quick@wg0 -f --no-pager -o cat | "
         "sed --unbuffered "
-        "-e 's/.*\[INFO\].*/\\x1b[32m&\\x1b[0m/' "
-        "-e 's/.*\[WARN\].*/\\x1b[33m&\\x1b[0m/' "
-        "-e 's/.*\[ERROR\].*/\\x1b[31m&\\x1b[0m/' "
-        "-e 's/.*\[DEBUG\].*/\\x1b[36m&\\x1b[0m/' "
-        "-e 's/.*handshake.*/\\x1b[35m&\\x1b[0m/'"
+        r"-e 's/.*\[INFO\].*/\x1b[32m&\x1b[0m/' "
+        r"-e 's/.*\[WARN\].*/\x1b[33m&\x1b[0m/' "
+        r"-e 's/.*\[ERROR\].*/\x1b[31m&\x1b[0m/' "
+        r"-e 's/.*\[DEBUG\].*/\x1b[36m&\x1b[0m/' "
+        r"-e 's/.*handshake.*/\x1b[35m&\x1b[0m/'"
     )
     try:
         os.system(cmd)
@@ -1227,7 +1279,8 @@ Quick-start workflow:
     frp.add_argument("--weekly", action="store_true",
                      help="Include weekly auto-block summary section")
     sub.add_parser("profiles",         help="List available firewall profiles")
-    sub.add_parser("rules",            help="Print the live nftables ruleset")
+    rp = sub.add_parser("rules", help="Print the live nftables ruleset")
+    rp.add_argument("--no-sets", action="store_true", help="Remove large elements = { ... } blocks from output")
     sub.add_parser("health",           help="JSON health report (exit 0=healthy, 1=degraded)")
     sub.add_parser("debug",            help="Technical debug dump for AI diagnostics")
     sub.add_parser("logs",             help="Real-time color-coded event stream")
@@ -1240,11 +1293,13 @@ Quick-start workflow:
     gp.add_argument("country_codes", nargs="+", metavar="CC")
 
     sub.add_parser("geoblock-test",   help="Verify that blocked countries are actually filtered")
+    sub.add_parser("geoblock-status", help="Show blocked countries, CIDR counts, and cache info")
 
     gup = sub.add_parser("geounblock", help="Remove all CIDRs blocked for a country")
     gup.add_argument("country_code", metavar="CC")
 
     sub.add_parser("geolist", help="Show blocked countries and CIDR counts")
+    sub.add_parser("set-stats", help="Show element counts for all dynamic nftables sets")
     sub.add_parser("menu",    help="Interactive TUI menu for easy management")
 
     return p
@@ -1285,8 +1340,10 @@ _HANDLERS = {
     "metrics-update"  : _cmd_metrics_update,
     "geoblock"        : _cmd_geoblock,
     "geoblock-test"   : _cmd_geoblock_test,
+    "geoblock-status" : _cmd_geoblock_status,
     "geounblock"      : _cmd_geounblock,
     "geolist"         : _cmd_geolist,
+    "set-stats"       : _cmd_set_stats,
 }
 
 
