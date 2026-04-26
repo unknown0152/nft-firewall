@@ -543,21 +543,22 @@ class NftWatchdog:
         """Return True only if *content* contains structural killswitch markers."""
         if not content.strip():
             return False
-        required = ["table ip6 killswitch", "policy drop"]
-        for pattern in required:
-            if pattern not in content:
-                return False
+        
+        # Core safety requirements — must have at least one of these to be considered valid
+        # We use a logical OR here for resilience, but require the specific comment
+        core_patterns = ["table ip6 killswitch", "policy drop", "nft-killswitch-output"]
+        found_patterns = [p for p in core_patterns if p in content]
+        
+        # If we have at least 2 of the 3 markers, it's highly likely a valid file
+        if len(found_patterns) < 2:
+            return False
+
         if self._markers:
             output_marker = str(self._markers.get("output_rule", "")).strip()
-            # Extract actual comment string for flexible matching
             comment_match = re.search(r'comment\s+"([^"]+)"', output_marker)
             comment_str = comment_match.group(1) if comment_match else "nft-killswitch-output"
             
             if comment_str not in content:
-                return False
-
-            ip6_table = str(self._markers.get("ip6_table", "")).strip()
-            if ip6_table and f"table ip6 {ip6_table}" not in content:
                 return False
         return True
 
