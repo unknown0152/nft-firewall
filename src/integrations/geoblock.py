@@ -233,12 +233,43 @@ def list_blocked() -> "dict[str, int]":
     return {cc: len(cidrs) for cc, cidrs in state.items()}
 
 
-def reblock_from_config(blocked_countries: "list[str]") -> None:
-    """Re-apply geo-blocks for countries listed in config."""
+def geotest() -> None:
+    """Validate that blocked countries are actually being filtered by the live ruleset."""
+    import ipaddress
+    import subprocess
+    from core.state import SET_BLOCKED
+
     state = _load_state()
-    for cc in blocked_countries:
-        cc = cc.upper()
-        if cc in state:
-            continue
-        print(f"[geoblock] re-blocking {cc} from config...")
-        block_country(cc)
+    if not state:
+        print("  \033[33m!\033[0m No countries are currently geo-blocked.")
+        return
+
+    print("  \033[1mGeo-Block Validation Test\033[0m")
+    print("  " + "─" * 40)
+
+    for cc, cidrs in state.items():
+        if not cidrs: continue
+        
+        # Pick the first IP from the first range as a probe
+        try:
+            net = ipaddress.ip_network(cidrs[0])
+            probe_ip = str(next(net.hosts()))
+        except Exception:
+            probe_ip = cidrs[0].split('/')[0]
+
+        # Use 'nft --check' simulation to see if it's in the set
+        # 'nft get element ip firewall blocked_ips { IP }' returns 0 if found
+        cmd = ["nft", "get", "element", "ip", "firewall", SET_BLOCKED, "{", probe_ip, "}"]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if proc.returncode == 0:
+            status = "\033[32m🟢 BLOCKED\033[0m"
+            detail = f"(Probe: {probe_ip})"
+        else:
+            status = "\033[31m🔴 LEAKING\033[0m"
+            detail = f"(IP {probe_ip} not found in live set)"
+
+        print(f"  {cc:<4} {status:<20} {detail}")
+
+    print("  " + "─" * 40)
+    print("  \033[34m→\033[0m Verification complete.")

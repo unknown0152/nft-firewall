@@ -478,6 +478,12 @@ def _cmd_geoblock(args: argparse.Namespace) -> None:
         print(f"[geoblock] {cc.upper()}: +{blocked} CIDRs blocked, {skipped} skipped")
 
 
+def _cmd_geoblock_test(_args: argparse.Namespace) -> None:
+    """geoblock-test — validate that blocked countries are actually dropped."""
+    from integrations.geoblock import geotest
+    geotest()
+
+
 def _cmd_geounblock(args: argparse.Namespace) -> None:
     """geounblock <CC> — remove all CIDRs blocked for a country."""
     from integrations.geoblock import unblock_country
@@ -705,6 +711,27 @@ def _nft_check_permission_error(message: str) -> bool:
         "permission denied",
     )
     return any(needle in lowered for needle in needles)
+
+
+def _cmd_logs(_args: argparse.Namespace) -> None:
+    """logs — Real-time color-coded stream of firewall and VPN events."""
+    print("📋 Streaming Firewall & VPN Events (Ctrl+C to stop)...")
+    print("-" * 50)
+    
+    # We use a combined journalctl command with color-coded markers
+    cmd = (
+        "journalctl -u nft-watchdog -u nft-ssh-alert -u wg-quick@wg0 -f --no-pager -o cat | "
+        "sed --unbuffered "
+        "-e 's/.*\[INFO\].*/\\x1b[32m&\\x1b[0m/' "
+        "-e 's/.*\[WARN\].*/\\x1b[33m&\\x1b[0m/' "
+        "-e 's/.*\[ERROR\].*/\\x1b[31m&\\x1b[0m/' "
+        "-e 's/.*\[DEBUG\].*/\\x1b[36m&\\x1b[0m/' "
+        "-e 's/.*handshake.*/\\x1b[35m&\\x1b[0m/'"
+    )
+    try:
+        os.system(cmd)
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
 
 def _cmd_debug(_args: argparse.Namespace) -> None:
@@ -1195,6 +1222,7 @@ Quick-start workflow:
     sub.add_parser("rules",            help="Print the live nftables ruleset")
     sub.add_parser("health",           help="JSON health report (exit 0=healthy, 1=degraded)")
     sub.add_parser("debug",            help="Technical debug dump for AI diagnostics")
+    sub.add_parser("logs",             help="Real-time color-coded event stream")
     sub.add_parser("keybase-test",     help="Send a test Keybase notification")
     sub.add_parser("maintenance",      help="Prune state backups >30 days old and rotated log files")
     sub.add_parser("threat-update", help="Sync threat feed IPs into blocked_ips set (daily via timer)")
@@ -1202,6 +1230,8 @@ Quick-start workflow:
 
     gp = sub.add_parser("geoblock",   help="Download and block all CIDRs for country codes (e.g. CN RU)")
     gp.add_argument("country_codes", nargs="+", metavar="CC")
+
+    sub.add_parser("geoblock-test",   help="Verify that blocked countries are actually filtered")
 
     gup = sub.add_parser("geounblock", help="Remove all CIDRs blocked for a country")
     gup.add_argument("country_code", metavar="CC")
@@ -1240,11 +1270,13 @@ _HANDLERS = {
     "rules"           : _cmd_rules,
     "health"          : _cmd_health,
     "debug"           : _cmd_debug,
+    "logs"            : _cmd_logs,
     "keybase-test"    : _cmd_keybase_test,
     "maintenance"     : _cmd_maintenance,
     "threat-update"   : _cmd_threat_update,
     "metrics-update"  : _cmd_metrics_update,
     "geoblock"        : _cmd_geoblock,
+    "geoblock-test"   : _cmd_geoblock_test,
     "geounblock"      : _cmd_geounblock,
     "geolist"         : _cmd_geolist,
 }
