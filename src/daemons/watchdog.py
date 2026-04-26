@@ -520,13 +520,10 @@ class NftWatchdog:
         output_marker = str(self._markers.get("output_rule", "")).strip()
         main_table = str(self._markers.get("main_table", "firewall")).strip()
         if output_marker:
-            # We check the 'main_table' (usually 'firewall') instead of hardcoding it
             ok, out, _ = self._run(["nft", "list", "chain", "ip", main_table, "output"])
-            comment_match = re.search(r'comment\s+"([^"]+)"', output_marker)
-            comment_str = comment_match.group(1) if comment_match else "nft-killswitch-output"
-            
-            if not ok or comment_str not in out:
-                return False, f"missing: OUTPUT rule marker ({comment_str}) in 'ip {main_table} output'"
+            # Flexible comment search: handles multi-line, packets/bytes, and interface names
+            if not ok or not re.search(r'comment\s+"nft-killswitch-output"', out):
+                return False, f"missing: OUTPUT rule marker in 'ip {main_table} output'"
 
         # 2. Check for IPv6 killswitch table
         ip6_table = str(self._markers.get("ip6_table", "")).strip()
