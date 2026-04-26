@@ -1029,6 +1029,24 @@ def step7_activate_vpn() -> None:
         _info("No /etc/wireguard/wg0.conf found — skipping auto-start")
         return
 
+    # DNS Resolution Safety: If the config uses a hostname, resolve it now
+    # while the network is still open.
+    try:
+        content = wg_conf.read_text()
+        m = re.search(r"Endpoint\s*=\s*([^:\s]+)", content)
+        if m:
+            host = m.group(1)
+            if not re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+                _info(f"Resolving VPN hostname: {host} ...")
+                import socket
+                try:
+                    ip = socket.gethostbyname(host)
+                    _ok(f"Resolved to {ip}")
+                except Exception as e:
+                    _warn(f"Could not resolve {host}: {e}. VPN may fail to start.")
+    except Exception:
+        pass
+
     _info("Found wg0.conf — enabling wg-quick@wg0.service ...")
     _run(["systemctl", "enable", "wg-quick@wg0"], check=False)
     r = _run(["systemctl", "restart", "wg-quick@wg0"], check=False)
