@@ -7,7 +7,11 @@
 set -euo pipefail
 
 cosmos_installed() {
-  [[ -s /etc/systemd/system/CosmosCloud.service ]] || [[ -x /opt/cosmos/start.sh ]]
+  # Require the systemd unit file specifically. The previous OR-with-start.sh
+  # check produced false positives when /opt/cosmos held leftover binaries
+  # from an earlier failed/partial install — the real installer was skipped
+  # and no CosmosCloud.service ever got registered.
+  [[ -s /etc/systemd/system/CosmosCloud.service ]]
 }
 
 echo "[+] Hardening Cosmos Cloud..."
