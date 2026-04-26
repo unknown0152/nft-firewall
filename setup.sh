@@ -20,6 +20,11 @@ apt-get install -y git curl fuse3 unzip nftables wireguard wireguard-tools wireg
 # Ensure systemd sees new units immediately
 systemctl daemon-reload
 
+# Fix DNS symlink if openresolv/resolvconf transition broke it
+if [ -f /run/resolvconf/resolv.conf ]; then
+    ln -sf /run/resolvconf/resolv.conf /etc/resolv.conf
+fi
+
 # 2. Create temp workspace
 INSTALL_TMP=$(mktemp -d /tmp/nft-firewall-install.XXXXXX)
 echo "[+] Downloading full installer to $INSTALL_TMP..."
