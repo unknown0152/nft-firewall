@@ -84,7 +84,7 @@ echo "[+] Activating nftables..."
 systemctl enable --now nftables || true
 systemctl daemon-reload
 
-if cosmos_installed; then
+if [[ -f /etc/systemd/system/CosmosCloud.service ]]; then
   echo "[+] Restarting CosmosCloud with new security profile..."
   systemctl restart CosmosCloud || true
 fi
