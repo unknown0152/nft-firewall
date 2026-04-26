@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -970,7 +971,6 @@ def step6_reload_and_restart() -> None:
     _ok("systemctl daemon-reload")
 
     # Short delay to allow systemd to settle (essential for fresh user/unit recognition)
-    import time
     time.sleep(2)
 
     for svc in ACTIVE_SERVICES:
@@ -997,6 +997,26 @@ def step6_reload_and_restart() -> None:
             _warn(f"{unit} failed: {r.stderr.strip()}")
 
 
+# ── Step 7: VPN Activation ────────────────────────────────────────────────────
+
+def step7_activate_vpn() -> None:
+    """If wg0.conf exists, enable and start wg-quick@wg0.service."""
+    _header("Step 7 — VPN Activation")
+
+    wg_conf = Path("/etc/wireguard/wg0.conf")
+    if not wg_conf.exists():
+        _info("No /etc/wireguard/wg0.conf found — skipping auto-start")
+        return
+
+    _info("Found wg0.conf — enabling wg-quick@wg0.service ...")
+    _run(["systemctl", "enable", "wg-quick@wg0"], check=False)
+    r = _run(["systemctl", "restart", "wg-quick@wg0"], check=False)
+    if r.returncode == 0:
+        _ok("wg-quick@wg0.service started")
+    else:
+        _warn(f"Failed to start wg-quick@wg0: {r.stderr.strip()}")
+
+
 # ── Sub-commands ──────────────────────────────────────────────────────────────
 
 def cmd_install(reconfigure: bool = False) -> None:
@@ -1008,6 +1028,7 @@ def cmd_install(reconfigure: bool = False) -> None:
     step4_install_sudoers()
     step5_deploy_services()
     step6_reload_and_restart()
+    step7_activate_vpn()
 
     print()
     print("\033[32m\033[1m  Install complete.\033[0m")

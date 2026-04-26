@@ -1,8 +1,7 @@
 [Unit]
 Description=NFT Firewall Listener — Keybase ChatOps bot
 After=network-online.target nft-watchdog.service
-Wants=network-online.target
-Requires=nft-watchdog.service
+Wants=network-online.target nft-watchdog.service
 
 [Service]
 Type=simple
