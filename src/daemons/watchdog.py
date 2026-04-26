@@ -328,7 +328,6 @@ class NftWatchdog:
                 raise ValueError(f"markers JSON missing keys: {required}")
             self._markers       = data
             self._markers_mtime = st.st_mtime
-            self._log("INFO", f"Loaded watchdog markers: {self._markers}")
         except Exception as exc:
             self._markers       = None
             self._markers_mtime = None
@@ -523,8 +522,6 @@ class NftWatchdog:
         # If the command failed, it likely means the table or chain is MISSING.
         if not ok:
              return False, f"missing: {main_table} table or output chain"
-
-        self._log("DEBUG", f"Integrity check chain dump (table={main_table}):\n{out}")
         
         # DEFINITIVE SEARCH: We look for the literal comment in the entire chain dump.
         if "nft-killswitch-output" not in out:
@@ -549,10 +546,8 @@ class NftWatchdog:
         # Core safety requirements — proved to be 'our' firewall.
         if "policy drop" in lowered and "nft-killswitch-output" in lowered:
             return True
-            
-        self._log("WARN", f"Conf validation FAILED. content length: {len(content)}")
-        return False
 
+        return False
     # ── Endpoint IP cache ─────────────────────────────────────────────────────
 
     def _cache_endpoint_ip(

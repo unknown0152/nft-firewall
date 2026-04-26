@@ -17,10 +17,8 @@ if cosmos_installed; then
 else
   echo "[+] Downloading Cosmos installer..."
   COSMOS_INSTALLER="$(mktemp /tmp/cosmos-get.XXXXXX.sh)"
-  echo "[debug] Temp installer path: $COSMOS_INSTALLER"
   # Check for curl again just in case
   if ! command -v curl >/dev/null 2>&1; then
-      echo "[debug] curl missing, installing..."
       apt-get update -qq && apt-get install -y curl >/dev/null
   fi
   curl -sfL https://cosmos-cloud.io/get.sh -o "$COSMOS_INSTALLER"
@@ -80,7 +78,6 @@ echo "[+] Ensuring Docker firewall authority is disabled..."
 mkdir -p /etc/docker
 if [[ ! -f /etc/docker/daemon.json ]]; then
   echo '{"iptables": false, "ip6tables": false}' > /etc/docker/daemon.json
-  echo "[debug] Created /etc/docker/daemon.json with iptables disabled"
   systemctl restart docker || echo "[!] Docker restart failed (non-fatal)"
 fi
 
