@@ -58,15 +58,22 @@ if getent group docker >/dev/null 2>&1; then
 fi
 
 # 3. Permissions wrapper
+# Runs from the systemd ExecStartPre with the `+` prefix (i.e. as root) so it
+# can create /var/lib/cosmos and reassign /opt/cosmos to the media user before
+# the launcher tries to chmod its binaries.
 cat > /usr/local/bin/fix-cosmos-perms <<'EOF'
 #!/usr/bin/env bash
 set -e
-chown -R media:media /opt/cosmos /var/lib/cosmos 2>/dev/null || true
-chmod -R u+rwX /var/lib/cosmos 2>/dev/null || true
+mkdir -p /var/lib/cosmos
+chown -R media:media /opt/cosmos /var/lib/cosmos
+chmod -R u+rwX /var/lib/cosmos
 EOF
 chmod +x /usr/local/bin/fix-cosmos-perms
 
 # 4. Systemd overrides
+# `ExecStartPre=+` runs the helper as root regardless of User=, which is
+# required because chown/mkdir under /var/lib are root-only operations. The
+# main ExecStart still drops to media:media via User=/Group=.
 mkdir -p /etc/systemd/system/CosmosCloud.service.d
 cat > /etc/systemd/system/CosmosCloud.service.d/override.conf <<'EOF'
 [Service]
@@ -74,7 +81,7 @@ User=media
 Group=media
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-ExecStartPre=/usr/local/bin/fix-cosmos-perms
+ExecStartPre=+/usr/local/bin/fix-cosmos-perms
 EOF
 
 # 5. Docker configuration
