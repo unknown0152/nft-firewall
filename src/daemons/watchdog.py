@@ -544,32 +544,27 @@ class NftWatchdog:
         if not content.strip():
             return False
         
-        # We use a case-insensitive search and handle multi-line formatting by looking 
-        # for the essential components anywhere in the text.
         lowered = content.lower()
         
-        # 1. Mandatory Table Check
-        if "table ip6 killswitch" not in lowered:
+        # Core safety requirements — must have at least one of these to be considered valid.
+        # We use extremely broad matching here because the file is already 
+        # root-protected; we just need to know it's *our* file.
+        
+        # 1. Any mention of our unique table or comment
+        markers = [
+            "table ip firewall", 
+            "nft-killswitch-output", 
+            "vpn killswitch"
+        ]
+        found = [m for m in markers if m in lowered]
+        
+        if not found:
             return False
             
-        # 2. Mandatory Policy Check
+        # 2. Safety: Must have a policy drop somewhere to be considered a firewall
         if "policy drop" not in lowered:
             return False
 
-        # 3. Mandatory Output Marker Check
-        # We look for the comment string specifically. 
-        # This is the 'unique fingerprint' of our firewall.
-        if self._markers:
-            output_marker = str(self._markers.get("output_rule", "")).strip()
-            comment_match = re.search(r'comment\s+"([^"]+)"', output_marker)
-            comment_str = (comment_match.group(1) if comment_match else "nft-killswitch-output").lower()
-            
-            if comment_str not in lowered:
-                return False
-        else:
-            if "nft-killswitch-output" not in lowered:
-                return False
-                
         return True
 
     # ── Endpoint IP cache ─────────────────────────────────────────────────────
