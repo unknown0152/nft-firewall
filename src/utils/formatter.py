@@ -71,7 +71,7 @@ def _docker_running() -> str:
             err = r.stderr.strip().splitlines()[0] if r.stderr else f"exit {r.returncode}"
             # Shorten common permission error
             if "permission denied" in err.lower():
-                return "🔴 permission denied"
+                return "🔴 logout required"
             return f"🔴 {err[:20]}"
         names = [l for l in r.stdout.splitlines() if l.strip()]
         n = len(names)
