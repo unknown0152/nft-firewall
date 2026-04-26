@@ -544,21 +544,24 @@ class NftWatchdog:
         if not content.strip():
             return False
         
+        lowered = content.lower()
+        
         # Core safety requirements — must have at least one of these to be considered valid
         # We use a logical OR here for resilience, but require the specific comment
         core_patterns = ["table ip6 killswitch", "policy drop", "nft-killswitch-output"]
-        found_patterns = [p for p in core_patterns if p in content]
+        found_patterns = [p for p in core_patterns if p in lowered]
         
-        # If we have at least 2 of the 3 markers, it's highly likely a valid file
-        if len(found_patterns) < 2:
+        # If we have at least 1 of the core patterns (like policy drop), 
+        # we check for the critical comment marker more carefully
+        if not found_patterns:
             return False
 
         if self._markers:
             output_marker = str(self._markers.get("output_rule", "")).strip()
             comment_match = re.search(r'comment\s+"([^"]+)"', output_marker)
-            comment_str = comment_match.group(1) if comment_match else "nft-killswitch-output"
+            comment_str = (comment_match.group(1) if comment_match else "nft-killswitch-output").lower()
             
-            if comment_str not in content:
+            if comment_str not in lowered:
                 return False
         return True
 
@@ -862,19 +865,12 @@ class NftWatchdog:
         for level_num, fn in levels:
             self._log("INFO", f"Trying recovery level {level_num}/4 ...")
             try:
-                fn()
+                success = fn()
+                if not success:
+                    self._log("WARN", f"Level {level_num} failed — escalating immediately")
+                    continue
             except Exception as exc:
-                self._log("WARN", f"Level {level_num} raised exception: {exc}")
-
-            # Fix: skip the 40-second handshake wait when the interface is not
-            # up — it means this level did nothing (e.g. Level 3 DNS failure)
-            # or its restart command failed outright.
-            iface_ok, _, _ = self._run(["ip", "link", "show", iface])
-            if not iface_ok:
-                self._log(
-                    "WARN",
-                    f"Level {level_num}: {iface} not present after recovery attempt — escalating",
-                )
+                self._log("WARN", f"Level {level_num} raised exception: {exc} — escalating")
                 continue
 
             self._log("INFO", f"Waiting up to {recovery_wait}s for WireGuard handshake ...")
