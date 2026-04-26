@@ -65,3 +65,4 @@ htmlcov/
 full_project_review.txt
 *.bak
 *.orig
+.vagrant/
