@@ -519,11 +519,15 @@ class NftWatchdog:
         # 1. Check OUTPUT chain for our marker
         main_table = str(self._markers.get("main_table", "firewall")).strip()
         ok, out, _ = self._run(["nft", "list", "chain", "ip", main_table, "output"])
+        
+        # If the command failed, it likely means the table or chain is MISSING.
+        if not ok:
+             return False, f"missing: {main_table} table or output chain"
+
         self._log("DEBUG", f"Integrity check chain dump (table={main_table}):\n{out}")
         
         # DEFINITIVE SEARCH: We look for the literal comment in the entire chain dump.
-        # This is safe because 'nft-killswitch-output' is a string we control.
-        if not ok or "nft-killswitch-output" not in out:
+        if "nft-killswitch-output" not in out:
             return False, f"missing: OUTPUT rule marker in 'ip {main_table} output'"
 
         # 2. Check for IPv6 killswitch table
