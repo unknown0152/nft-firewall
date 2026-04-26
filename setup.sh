@@ -12,7 +12,7 @@ echo "[+] NFT Firewall Bootstrapper"
 # 1. Install mandatory system packages if missing
 echo "[+] Updating package cache and installing mandatory tools..."
 apt-get update -qq
-apt-get install -y git curl fuse3 unzip nftables wireguard wireguard-tools python3-pip
+apt-get install -y git curl fuse3 unzip nftables wireguard wireguard-tools wireguard-dkms openresolv python3-pip
 
 # Ensure systemd sees new units immediately
 systemctl daemon-reload
