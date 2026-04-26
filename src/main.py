@@ -186,6 +186,7 @@ def _write_watchdog_markers(ruleset_cfg) -> None:
     data = {
         "vpn_iface"  : ruleset_cfg.vpn_interface,
         "ip6_table"  : "killswitch",
+        "main_table" : "firewall",
         "output_rule": 'comment "nft-killswitch-output"',
     }
     _MARKERS_FILE.parent.mkdir(parents=True, exist_ok=True)
