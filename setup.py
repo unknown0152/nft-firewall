@@ -1003,6 +1003,9 @@ def step7_activate_vpn() -> None:
     """If wg0.conf exists, enable and start wg-quick@wg0.service."""
     _header("Step 7 — VPN Activation")
 
+    # Redundant reload to force systemd to see wg-quick template from newly installed package
+    _run(["systemctl", "daemon-reload"], check=False)
+
     wg_conf = Path("/etc/wireguard/wg0.conf")
     if not wg_conf.exists():
         _info("No /etc/wireguard/wg0.conf found — skipping auto-start")
