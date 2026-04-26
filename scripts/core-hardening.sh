@@ -44,8 +44,8 @@ if [[ -f /opt/cosmos/start.sh ]]; then
   cat > /opt/cosmos/start.sh <<'EOF'
 #!/bin/bash
 cd /opt/cosmos
-chmod +x cosmos
-chmod +x cosmos-launcher
+# The fix-cosmos-perms script handles base permissions; 
+# launcher handles internal binary permissions.
 ./cosmos-launcher && ./cosmos
 EOF
   chmod +x /opt/cosmos/start.sh
@@ -65,8 +65,9 @@ cat > /usr/local/bin/fix-cosmos-perms <<'EOF'
 #!/usr/bin/env bash
 set -e
 mkdir -p /var/lib/cosmos
-chown -R media:media /opt/cosmos /var/lib/cosmos
-chmod -R u+rwX /var/lib/cosmos
+# Ensure the top-level directories are owned by media so it can write inside them
+chown media:media /opt/cosmos /var/lib/cosmos
+chmod 755 /opt/cosmos /var/lib/cosmos
 EOF
 chmod +x /usr/local/bin/fix-cosmos-perms
 
