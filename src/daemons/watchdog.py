@@ -328,7 +328,7 @@ class NftWatchdog:
                 raise ValueError(f"markers JSON missing keys: {required}")
             self._markers       = data
             self._markers_mtime = st.st_mtime
-            self._log("INFO", f"Loaded watchdog markers from {mf}")
+            self._log("INFO", f"Loaded watchdog markers: {self._markers}")
         except Exception as exc:
             self._markers       = None
             self._markers_mtime = None
@@ -519,6 +519,7 @@ class NftWatchdog:
         # 1. Check OUTPUT chain for our marker
         main_table = str(self._markers.get("main_table", "firewall")).strip()
         ok, out, _ = self._run(["nft", "list", "chain", "ip", main_table, "output"])
+        self._log("DEBUG", f"Integrity check chain dump (table={main_table}):\n{out}")
         
         # DEFINITIVE SEARCH: We look for the literal comment in the entire chain dump.
         # This is safe because 'nft-killswitch-output' is a string we control.
@@ -552,12 +553,15 @@ class NftWatchdog:
             "vpn killswitch"
         ]
         found = [m for m in markers if m in lowered]
+        self._log("DEBUG", f"Conf validation markers found: {found} in content dump:\n{content[:500]}...")
         
         if not found:
+            self._log("WARN", f"Conf validation FAILED: none of {markers} found")
             return False
             
         # 2. Safety: Must have a policy drop somewhere to be considered a firewall
         if "policy drop" not in lowered:
+            self._log("WARN", "Conf validation FAILED: 'policy drop' missing")
             return False
 
         return True
