@@ -153,7 +153,7 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
     dynamic_sets = state.merge_live_sets_into_persistent()
     docker_networks = detect_bridge_networks(container_supernet)
 
-    return RulesetConfig(
+    conf = RulesetConfig(
         phy_if             = phy_if,
         vpn_interface      = cfg.get("network", "vpn_interface",      fallback="wg0"),
         vpn_server_ip      = cfg.get("network", "vpn_server_ip",      fallback=""),
@@ -175,6 +175,14 @@ def _build_ruleset_config(cfg: configparser.ConfigParser, profile_name: str):
         geowhitelist_ips   = dynamic_sets.get(state.SET_WHITELIST, []),
         dk_ips             = dynamic_sets.get(state.SET_DK, []),
     )
+
+    # RUNTIME VALIDATION: Ensure interfaces actually exist when NOT in preflight/install mode
+    if not os.environ.get("NFT_FIREWALL_NO_VALIDATE_IF"):
+        from core.rules import validate_interface_exists
+        validate_interface_exists(conf.phy_if)
+        validate_interface_exists(conf.vpn_interface)
+
+    return conf
 
 
 def _write_watchdog_markers(ruleset_cfg) -> None:

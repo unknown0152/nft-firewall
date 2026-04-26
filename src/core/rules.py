@@ -26,7 +26,9 @@ The returned string can be passed directly to ``state.apply_ruleset()``.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -125,6 +127,17 @@ class RulesetConfig:
 
     def __post_init__(self) -> None:
         """Reject unsafe network inputs before any nft syntax is generated."""
+        # 1. Validate interface semantics (logical)
+        if not self.phy_if:
+            raise ValueError("phy_if is required")
+        if self.vpn_interface == self.phy_if:
+            raise ValueError(f"vpn_interface cannot be the same as phy_if ({self.phy_if})")
+        
+        # Require vpn_interface to look like a tunnel (wg*) unless explicitly overridden
+        if not self.vpn_interface.startswith("wg") and not os.environ.get("NFT_FIREWALL_ALLOW_ANY_VPN_IF"):
+             raise ValueError(f"Invalid vpn_interface '{self.vpn_interface}'; must start with 'wg'")
+
+        # 2. Validate CIDRs
         for label, value in (
             ("lan_net", self.lan_net),
             ("container_supernet", self.container_supernet),
@@ -137,6 +150,7 @@ class RulesetConfig:
         self.docker_networks = _validated_network_list("docker_networks", self.docker_networks)
         self.blocked_ips = _validated_set_members("blocked_ips", self.blocked_ips)
         self.trusted_ips = _validated_set_members("trusted_ips", self.trusted_ips)
+        self.geowhitelist_ips = _validated_set_members("geowhitelist_ips", self.geowhitelist_ips)
         self.dk_ips = _validated_set_members("dk_ips", self.dk_ips)
 
 
@@ -642,6 +656,56 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def validate_interface_exists(iface: str) -> None:
+    """Raise ValueError if interface *iface* does not exist on the system."""
+    try:
+        # We use ip link show instead of socket/ioctl to avoid extra imports
+        proc = subprocess.run(["ip", "link", "show", iface], 
+                            capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            raise ValueError(f"Interface '{iface}' not found on this system.")
+    except FileNotFoundError:
+        # If 'ip' command is missing, we skip validation
+        pass
+
+
+def _check_invariants(cfg: RulesetConfig, ruleset: str) -> None:
+    """Raise ValueError if the ruleset violates core security invariants."""
+    # 1. Strip '#' comments for analysis to prevent bypasses or false positives
+    # We preserve 'comment "..."' tokens as they are part of our integrity markers
+    clean = re.sub(r'#.*$', '', ruleset, flags=re.MULTILINE)
+    condensed = re.sub(r'\s+', ' ', clean)
+
+    # 2. Detect dangerous /0 network (too broad)
+    # Catches: 0.0.0.0/0, 0/0, ip saddr 0/0, etc.
+    if re.search(r'\b0(\.0\.0\.0)?/0\b', clean):
+        raise ValueError("Security violation: /0 network found in ruleset (too broad)")
+
+    # 3. Detect public ports 80/443 on physical interface
+    phy = cfg.phy_if
+    # Search for ALL chain blocks to find any public port exposure on the physical interface.
+    # We find blocks between curly braces in the cleaned ruleset.
+    for block_match in re.finditer(r'{(.*?)}', clean, re.DOTALL):
+        block = block_match.group(1)
+        # Simplify the block by condensing all whitespace into single spaces
+        block_clean = re.sub(r'\s+', ' ', block)
+        # Strictest check: find 'iifname "PHY"', 'dport 80/443', and 'accept' 
+        # in that specific order within a single rule context (no other 'accept' or ';' in between).
+        # Pattern ensures we match '80' exactly and stay within a single rule.
+        pattern = rf'iifname "{re.escape(phy)}"(?:(?!accept|;).)*?dport\b(?:(?!accept|;).)*?\b(80|443)\b(?:(?!accept|;).)*?accept'
+        if re.search(pattern, block_clean, re.IGNORECASE):
+             raise ValueError(f"Security violation: Public port exposure detected on {phy}")
+
+
+    # 4. VPN Killswitch Marker must be present in ACTUAL code, not just comments
+    if 'nft-killswitch-output' not in ruleset:
+         raise ValueError("Security violation: Killswitch integrity marker missing from ruleset")
+    
+    # 5. VPN Egress Check: Ensure there's a functional accept rule for the VPN interface
+    if not re.search(r'oifname\s+"' + re.escape(cfg.vpn_interface) + r'"[\s\S]*?accept', clean, re.DOTALL):
+         raise ValueError(f"Security violation: No functional accept rule found for VPN interface {cfg.vpn_interface}")
+
+
 def generate_ruleset(cfg: RulesetConfig, exposed_ports: Optional[List[Dict]] = None) -> str:
     """Build the complete nftables ruleset as a single string.
 
@@ -688,4 +752,6 @@ def generate_ruleset(cfg: RulesetConfig, exposed_ports: Optional[List[Dict]] = N
     for section in sections:
         lines.extend(section)
 
-    return "\n".join(lines) + "\n"
+    ruleset = "\n".join(lines) + "\n"
+    _check_invariants(cfg, ruleset)
+    return ruleset

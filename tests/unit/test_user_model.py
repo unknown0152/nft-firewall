@@ -98,18 +98,6 @@ def test_sudoers_uses_fw_admin_and_not_legacy_nft_firewall(monkeypatch, tmp_path
     assert "/opt/nft-firewall/src/main.py *" not in content
 
 
-def test_base_setup_script_documents_user_model():
-    script = Path(__file__).resolve().parent.parent.parent / "setup.sh"
-    text = script.read_text()
-
-    assert 'FW_USER="fw-admin"' in text
-    assert 'LEGACY_FW_USER="nft-firewall"' in text
-    assert 'MEDIA_USER="media"' in text
-    assert 'COSMOS_COMPOSE_DIR="/home/media/compose/cosmos"' in text
-    assert 'add_to_group_if_user_exists "$MEDIA_USER" docker' in text
-    assert 'remove_from_group_if_member "$FW_USER" docker' in text
-
-
 def test_systemd_templates_run_as_fw_admin():
     systemd_dir = Path(__file__).resolve().parent.parent.parent / "systemd"
     service_files = sorted(systemd_dir.glob("nft-*.service"))

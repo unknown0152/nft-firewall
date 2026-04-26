@@ -25,8 +25,8 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_STATE_FILE   = _PROJECT_ROOT / "state" / "geoblock_state.json"
+_STATE_FILE   = Path("/var/lib/nft-firewall/geoblock_state.json")
+_CACHE_DIR    = Path("/var/lib/nft-firewall/geoip-cache")
 
 
 # ── Internal state management ─────────────────────────────────────────────────
@@ -57,8 +57,7 @@ def _save_state(state: Dict[str, List[str]]) -> None:
 def _fetch_country(cc: str) -> List[str]:
     """Fetch CIDR list for country *cc* from ipdeny.com with local caching."""
     cc = cc.lower()
-    cache_dir = Path("/var/lib/nft-firewall/geoip-cache")
-    cache_file = cache_dir / f"{cc}.zone"
+    cache_file = _CACHE_DIR / f"{cc}.zone"
     
     # Use cache if it's less than 7 days old
     if cache_file.exists():
@@ -74,7 +73,7 @@ def _fetch_country(cc: str) -> List[str]:
             content = resp.read().decode("utf-8")
             # Update cache
             try:
-                cache_dir.mkdir(parents=True, exist_ok=True)
+                _CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 cache_file.write_text(content)
             except Exception: pass
             return content.splitlines()
@@ -233,8 +232,25 @@ def list_blocked() -> "dict[str, int]":
     return {cc: len(cidrs) for cc, cidrs in state.items()}
 
 
+def get_total_cidr_count() -> int:
+    """Return the total number of CIDRs blocked across all countries."""
+    state = _load_state()
+    return sum(len(cidrs) for cidrs in state.values())
+
+
+def reblock_from_config(blocked_countries: List[str]) -> None:
+    """Re-apply geo-blocks for countries listed in config."""
+    state = _load_state()
+    for cc in blocked_countries:
+        cc = cc.upper()
+        if cc in state:
+            continue
+        print(f"[geoblock] re-blocking {cc} from config...")
+        block_country(cc)
+
+
 def geotest() -> None:
-    """Validate that blocked countries are actually being filtered by the live ruleset."""
+    """Check membership of probe IPs in the nftables blocked_ips set."""
     import ipaddress
     import subprocess
     from core.state import SET_BLOCKED
@@ -244,8 +260,10 @@ def geotest() -> None:
         print("  \033[33m!\033[0m No countries are currently geo-blocked.")
         return
 
-    print("  \033[1mGeo-Block Validation Test\033[0m")
-    print("  " + "─" * 40)
+    print("  \033[1mGeo-Block Membership Verification (Logical Only)\033[0m")
+    print("  " + "─" * 50)
+    print("  Note: This verifies nftables set membership, not actual packet drop.")
+    print("  " + "─" * 50)
 
     for cc, cidrs in state.items():
         if not cidrs: continue
@@ -257,19 +275,18 @@ def geotest() -> None:
         except Exception:
             probe_ip = cidrs[0].split('/')[0]
 
-        # Use 'nft --check' simulation to see if it's in the set
-        # 'nft get element ip firewall blocked_ips { IP }' returns 0 if found
+        # Check element in set
         cmd = ["nft", "get", "element", "ip", "firewall", SET_BLOCKED, "{", probe_ip, "}"]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         
         if proc.returncode == 0:
-            status = "\033[32m🟢 BLOCKED\033[0m"
+            status = "\033[32m🟢 IN SET\033[0m"
             detail = f"(Probe: {probe_ip})"
         else:
-            status = "\033[31m🔴 LEAKING\033[0m"
+            status = "\033[31m🔴 MISSING\033[0m"
             detail = f"(IP {probe_ip} not found in live set)"
 
         print(f"  {cc:<4} {status:<20} {detail}")
 
-    print("  " + "─" * 40)
-    print("  \033[34m→\033[0m Verification complete.")
+    print("  " + "─" * 50)
+    print("  \033[34m→\033[0m Membership verification complete.")

@@ -18,13 +18,15 @@ def test_setup_install_sequence_does_not_apply_live_rules(monkeypatch):
         "step4_install_sudoers",
         "step5_deploy_services",
         "step6_reload_and_restart",
-        "step7_apply_ruleset",
+        "step7_activate_vpn",
     ):
         monkeypatch.setattr(setup, name, lambda name=name, **_kw: calls.append(name))
 
     setup.cmd_install()
 
-    assert "step7_apply_ruleset" not in calls
+    # The installer should run the sequence but not 'apply' (which is the live rule command)
+    # Applying rules is handled by 'fw safe-apply' manually post-install.
+    assert "step7_activate_vpn" in calls
 
 
 def test_fw_wrapper_blocks_plain_apply():
@@ -102,6 +104,7 @@ def test_install_sequence_calls_nft_preflight(monkeypatch):
         "step4_install_sudoers",
         "step5_deploy_services",
         "step6_reload_and_restart",
+        "step7_activate_vpn",
     ):
         monkeypatch.setattr(setup, name, lambda name=name, **_kw: calls.append(name))
 

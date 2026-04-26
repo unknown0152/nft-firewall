@@ -47,11 +47,10 @@ def test_metrics_api() -> None:
 def test_knockd_api() -> None:
     from daemons.knockd import PortKnockDaemon
     assert hasattr(PortKnockDaemon, "run_daemon")
-    assert hasattr(PortKnockDaemon, "_handle_knock")
-    assert hasattr(PortKnockDaemon, "_open_for_ip")
+    assert hasattr(PortKnockDaemon, "run_step")
     assert hasattr(PortKnockDaemon, "_add_rule")
-    assert hasattr(PortKnockDaemon, "_revoke_rule")
-    assert hasattr(PortKnockDaemon, "_expire_rule")
+    assert hasattr(PortKnockDaemon, "_remove_rule")
+    assert hasattr(PortKnockDaemon, "_validate_vpn_iface")
 
 
 def test_main_handlers_present() -> None:
