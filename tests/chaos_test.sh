@@ -29,8 +29,8 @@ PYTHON="/usr/bin/python3"
 MAIN_PY="${INSTALL_DIR}/src/main.py"
 
 # How long to poll for VPN recovery (seconds). Watchdog check_interval=30s, so
-# worst-case detection + level-1 restart fits comfortably inside 90 seconds.
-RECOVERY_TIMEOUT=90
+# worst-case detection + level-1 restart fits comfortably inside 40 seconds.
+RECOVERY_TIMEOUT=40
 
 # Running counters
 PASS_COUNT=0
