@@ -832,24 +832,39 @@ def _write_executable(path: Path, content: str) -> None:
 def _install_sudo_wrappers() -> None:
     """Install root wrapper scripts that validate privileged command arguments."""
     _write_executable(WRAPPER_DIR / "fw-nft", """#!/usr/bin/env bash
+# Wrapper installed by nft-firewall setup.py
+# Restricts privileged nftables operations to a strict allowlist.
 set -euo pipefail
+
+# 1. Deny shell injection tokens in ANY argument
+for arg in "$@"; do
+  if [[ "$arg" == *[';|&$()`><']* ]]; then
+    echo "fw-nft: denied special characters in argument: $arg" >&2
+    exit 126
+  fi
+done
+
 case "${1:-}" in
   list)
     case "${2:-}" in
-      ruleset) exec /usr/sbin/nft list ruleset ;;
-      set) [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in blocked_ips|trusted_ips|dk_ips) exec /usr/sbin/nft "$@" ;; esac ;;
-      chain) [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in input|output|forward) exec /usr/sbin/nft "$@" ;; esac ;;
-      tables) [ "${3:-}" = "ip6" ] && exec /usr/sbin/nft "$@" ;;
+      ruleset) [ "$#" -eq 2 ] && exec /usr/sbin/nft list ruleset ;;
+      set) [ "$#" -eq 5 ] && [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in blocked_ips|trusted_ips|dk_ips|geowhitelist_ips) exec /usr/sbin/nft list set ip firewall "$5" ;; esac ;;
+      chain) [ "$#" -eq 5 ] && [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in input|output|forward) exec /usr/sbin/nft list chain ip firewall "$5" ;; esac ;;
+      tables) [ "$#" -eq 3 ] && [ "${2:-}" = "tables" ] && [ "${3:-}" = "ip6" ] && exec /usr/sbin/nft list tables ip6 ;;
     esac
     ;;
   add|delete)
-    [ "${2:-}" = "element" ] && [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && case "${5:-}" in blocked_ips|trusted_ips|dk_ips) exec /usr/sbin/nft "$@" ;; esac
-    [ "${1:-}" = "delete" ] && [ "${2:-}" = "rule" ] && [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && [ "${5:-}" = "input" ] && [ "${6:-}" = "handle" ] && exec /usr/sbin/nft "$@"
+    if [ "$#" -eq 6 ] && [ "${2:-}" = "element" ] && [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ]; then
+       case "${5:-}" in blocked_ips|trusted_ips|dk_ips|geowhitelist_ips) exec /usr/sbin/nft "$1" element ip firewall "$5" "$6" ;; esac
+    fi
+    if [ "$1" = "delete" ] && [ "$#" -eq 7 ] && [ "${2:-}" = "rule" ] && [ "${3:-}" = "ip" ] && [ "${4:-}" = "firewall" ] && [ "${5:-}" = "input" ] && [ "${6:-}" = "handle" ]; then
+       exec /usr/sbin/nft delete rule ip firewall input handle "$7"
+    fi
     ;;
-  --check) [ "${2:-}" = "--file" ] && exec /usr/sbin/nft "$@" ;;
-  --file|-f) [ "${2:-}" = "/etc/nftables.conf" ] && exec /usr/sbin/nft "$@" ;;
+  --check) [ "$#" -eq 3 ] && [ "${2:-}" = "--file" ] && exec /usr/sbin/nft --check --file "$3" ;;
+  --file|-f) [ "$#" -eq 2 ] && [ "${2:-}" = "/etc/nftables.conf" ] && exec /usr/sbin/nft -f /etc/nftables.conf ;;
 
-  --echo) [ "${2:-}" = "--json" ] && [ "${3:-}" = "add" ] && [ "${4:-}" = "rule" ] && [ "${5:-}" = "ip" ] && [ "${6:-}" = "firewall" ] && [ "${7:-}" = "input" ] && exec /usr/sbin/nft "$@" ;;
+  --echo) [ "$#" -eq 8 ] && [ "${2:-}" = "--json" ] && [ "${3:-}" = "add" ] && [ "${4:-}" = "rule" ] && [ "${5:-}" = "ip" ] && [ "${6:-}" = "firewall" ] && [ "${7:-}" = "input" ] && exec /usr/sbin/nft --echo --json add rule ip firewall input "$8" ;;
 esac
 echo "fw-nft: denied arguments: $*" >&2
 exit 126
