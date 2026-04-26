@@ -285,7 +285,7 @@ def _physical_public_web_lines(ruleset: str, phy_if: str, lan_net: str = "") -> 
     return matches
 
 
-def _check_live_rules_invariants(ruleset: str, phy_if: str, vpn_if: str) -> list[str]:
+def _check_live_rules_invariants(ruleset: str, phy_if: str, vpn_if: str, lan_net: str = "") -> list[str]:
     """Analyze a ruleset string for broad/unconditional accept rules.
 
     Returns a list of violation strings, or [] if clean.
@@ -293,45 +293,56 @@ def _check_live_rules_invariants(ruleset: str, phy_if: str, vpn_if: str) -> list
     import re
     violations = []
     
-    # Pre-process for robust analysis
+    # 1. Clean the ruleset (strip # comments) but PRESERVE newlines
     clean = re.sub(r'#.*$', '', ruleset, flags=re.MULTILINE)
-    condensed = re.sub(r'\s+', ' ', clean)
 
-    # 1. chain output contains standalone 'accept'
-    # We look for a chain block named 'output' that contains a bare 'accept'
-    # Pattern: chain output { [not an oifname wg0/lo or meta mark] accept }
-    for chain_match in re.finditer(r'chain\s+output\s+{(.*?)}', condensed, re.IGNORECASE):
-        body = chain_match.group(1).strip()
-        # Split by rule separators
-        for rule in re.split(r'[;\n]', body):
-            rule = rule.strip()
-            if not rule: continue
-            if "accept" in rule:
-                # Rule is literally just 'accept'
-                if rule == "accept":
-                    violations.append("output chain contains a potentially broad 'accept' rule: accept")
-                    continue
-                # Or rule contains accept but lacks safety tokens
-                is_safe = (
-                    'oifname "' + vpn_if + '"' in rule or
-                    'oifname "lo"' in rule or
-                    'iifname "lo"' in rule or
-                    'meta mark 0x' in rule
-                )
-                if not is_safe:
-                    violations.append(f"output chain contains a potentially broad 'accept' rule: {rule}")
+    # 2. Isolate chains
+    for chain_match in re.finditer(r'chain\s+(\w+)\s+{(.*?)}', clean, re.IGNORECASE | re.DOTALL):
+        chain_name = chain_match.group(1).lower()
+        body = chain_match.group(2)
+        
+        # Split into individual rules (handle both semicolons and newlines)
+        rules = [r.strip() for r in re.split(r'[;\n]', body) if r.strip()]
+        
+        for rule in rules:
+            if rule.startswith("type ") or rule.startswith("policy "):
+                continue
+                
+            rule_lower = rule.lower()
+            if "accept" in rule_lower:
+                # --- OUTPUT Chain Invariants ---
+                if chain_name == "output":
+                    if rule_lower == "accept":
+                        violations.append("output chain contains a standalone 'accept' rule")
+                        continue
+                        
+                    # Accept must be restricted to safe paths
+                    is_safe = (
+                        f'oifname "{vpn_if}"' in rule_lower or
+                        'oifname "lo"' in rule_lower or
+                        'iifname "lo"' in rule_lower or
+                        'meta mark 0x' in rule_lower or  # WireGuard bootstrap
+                        # DHCP client rule: oifname phy_if udp sport 68 dport 67 accept
+                        (f'oifname "{phy_if}"' in rule_lower and 'sport 68' in rule_lower and 'dport 67' in rule_lower) or
+                        # LAN destination allow: oifname phy_if ip daddr lan_net accept
+                        (lan_net and f'oifname "{phy_if}"' in rule_lower and f'ip daddr {lan_net}' in rule_lower) or
+                        # Docker bridge-local destination: meta oifkind "bridge" ip daddr @docker_nets accept
+                        ('meta oifkind "bridge"' in rule_lower and 'ip daddr @docker_nets' in rule_lower)
+                    )
+                    if not is_safe:
+                        violations.append(f"output chain contains a potentially broad 'accept' rule: {rule}")
 
-    # 3. forward accept that allows docker_nets to physical interface
-    # Look for: ip saddr @docker_nets oifname "PHY" accept
-    forward_pattern = rf'ip\s+saddr\s+@docker_nets\s+oifname\s+"{re.escape(phy_if)}".*?accept'
-    if re.search(forward_pattern, condensed, re.IGNORECASE):
-        violations.append(f"forwarding allows @docker_nets to escape via {phy_if}")
+                # --- FORWARD Chain Invariants ---
+                elif chain_name == "forward":
+                    if "ip saddr @docker_nets" in rule_lower and f'oifname "{phy_if}"' in rule_lower:
+                        if "ip daddr" not in rule_lower:
+                            violations.append(f"forwarding allows @docker_nets to escape via {phy_if}: {rule}")
 
-    # 4. input accept on physical interface for public ports 80/443
-    # Use the existing helper logic but on the live ruleset
-    public_phy = _physical_public_web_lines(ruleset, phy_if)
-    if public_phy:
-        violations.append(f"public port exposure on {phy_if}: {public_phy[0]}")
+                # --- INPUT Chain Invariants ---
+                elif chain_name == "input":
+                    if f'iifname "{phy_if}"' in rule_lower:
+                        if re.search(r'tcp\s+dport\s+({[^}]*?\b(80|443)\b[^}]*?}|(\b(80|443)\b))', rule_lower):
+                            violations.append(f"public port exposure on {phy_if}: {rule}")
 
     return violations
 
@@ -802,7 +813,12 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         try:
             live_result = subprocess.run(["nft", "list", "ruleset"], capture_output=True, text=True, check=True)
             live_rules = live_result.stdout
-            live_violations = _check_live_rules_invariants(live_rules, ruleset_cfg.phy_if, ruleset_cfg.vpn_interface)
+            live_violations = _check_live_rules_invariants(
+                live_rules, 
+                ruleset_cfg.phy_if, 
+                ruleset_cfg.vpn_interface,
+                getattr(ruleset_cfg, "lan_net", "")
+            )
             checks.append((
                 "live rules invariants",
                 "ok" if not live_violations else "fail",

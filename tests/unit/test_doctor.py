@@ -212,6 +212,146 @@ def test_doctor_detects_malicious_live_rules(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert exc.value.code == 1
     assert "[fail] live rules invariants" in out
-    assert "output chain contains a potentially broad 'accept' rule: accept" in out
+    assert "output chain contains a standalone 'accept' rule" in out
     assert "forwarding allows @docker_nets to escape via eth0" in out
     assert "public port exposure on eth0" in out
+
+
+def test_doctor_allows_intended_forward_rules(monkeypatch, capsys):
+    """Verify that doctor ALLOWS safe rules (hard-drop and LAN-restricted established)."""
+    main, state = _patch_doctor_common(monkeypatch)
+
+    monkeypatch.setattr(main.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state, "simulate_apply", lambda _ruleset: (True, ""))
+
+    import subprocess
+
+    def mock_run(cmd, **kwargs):
+        class MockResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        
+        res = MockResult()
+        if cmd == ["nft", "list", "ruleset"]:
+            res.stdout = (
+                'table ip firewall {\n'
+                '    chain forward {\n'
+                '        # SAFE: hard drop\n'
+                '        ip saddr @docker_nets oifname "eth0" drop\n'
+                '        # SAFE: restricted established\n'
+                '        ip saddr @docker_nets oifname "eth0" ip daddr 192.168.1.0/24 ct state established,related accept\n'
+                '    }\n'
+                '    chain output {\n'
+                '        oifname "wg0" accept comment "nft-killswitch-output"\n'
+                '    }\n'
+                '}\n'
+            )
+        return res
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    with pytest.raises(SystemExit) as exc:
+        main._cmd_doctor(types.SimpleNamespace(profile="cosmos-vpn-secure"))
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 0
+    assert "[ok] live rules invariants: intact" in out
+
+
+def test_doctor_fails_on_malicious_forward_established(monkeypatch, capsys):
+    """Verify that doctor FAILS on established rules that LACK daddr restriction."""
+    main, state = _patch_doctor_common(monkeypatch)
+
+    monkeypatch.setattr(main.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state, "simulate_apply", lambda _ruleset: (True, ""))
+
+    import subprocess
+
+    def mock_run(cmd, **kwargs):
+        class MockResult:
+            returncode = 0
+            stdout = 'table ip firewall {\n' \
+                     '    chain forward {\n' \
+                     '        ip saddr @docker_nets oifname "eth0" ct state established,related accept\n' \
+                     '    }\n' \
+                     '    chain output {\n' \
+                     '        oifname "wg0" accept comment "nft-killswitch-output"\n' \
+                     '    }\n' \
+                     '}\n'
+            stderr = ""
+        return MockResult()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    with pytest.raises(SystemExit) as exc:
+        main._cmd_doctor(types.SimpleNamespace(profile="cosmos-vpn-secure"))
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "forwarding allows @docker_nets to escape via eth0" in out
+
+
+def test_doctor_fails_on_standalone_output_accept(monkeypatch, capsys):
+    """Verify that doctor FAILS when a bare 'accept' is added to output chain."""
+    main, state = _patch_doctor_common(monkeypatch)
+    monkeypatch.setattr(main.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state, "simulate_apply", lambda _ruleset: (True, ""))
+
+    import subprocess
+    def mock_run(cmd, **kwargs):
+        class MockResult:
+            returncode = 0
+            stdout = (
+                'table ip firewall {\n'
+                '    chain output {\n'
+                '        type filter hook output priority filter; policy drop;\n'
+                '        oifname "wg0" accept comment "nft-killswitch-output"\n'
+                '        accept\n' # MALICIOUS BARE ACCEPT
+                '    }\n'
+                '}\n'
+            )
+            stderr = ""
+        return MockResult()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    with pytest.raises(SystemExit) as exc:
+        main._cmd_doctor(types.SimpleNamespace(profile="cosmos-vpn-secure"))
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "output chain contains a standalone 'accept' rule" in out
+
+
+def test_doctor_allows_wireguard_bootstrap_output_rule(monkeypatch, capsys):
+    """Verify that doctor ALLOWS the legitimate WireGuard bootstrap rule in output."""
+    main, state = _patch_doctor_common(monkeypatch)
+    monkeypatch.setattr(main.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state, "simulate_apply", lambda _ruleset: (True, ""))
+
+    import subprocess
+    def mock_run(cmd, **kwargs):
+        class MockResult:
+            returncode = 0
+            stdout = (
+                'table ip firewall {\n'
+                '    chain output {\n'
+                '        type filter hook output priority filter; policy drop;\n'
+                '        # The actual bootstrap rule from core/rules.py\n'
+                '        oifname "eth0" meta mark 0x0000ca6c ip daddr 1.2.3.4 udp dport 51820 accept\n'
+                '        oifname "wg0" accept comment "nft-killswitch-output"\n'
+                '    }\n'
+                '}\n'
+            )
+            stderr = ""
+        return MockResult()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    with pytest.raises(SystemExit) as exc:
+        main._cmd_doctor(types.SimpleNamespace(profile="cosmos-vpn-secure"))
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 0
+    assert "[ok] live rules invariants: intact" in out
