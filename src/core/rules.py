@@ -553,8 +553,10 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a("    chain output {")
     a("        type filter hook output priority filter; policy drop;")
     a("")
-    a("        # Atomic marker for watchdog/doctor integrity checks")
-    a('        counter accept comment "nft-killswitch-output"')
+    # Atomic marker for watchdog/doctor integrity checks
+    # This rule is the SOLE path for internet traffic — it MUST be bound to the VPN interface.
+    a(f'        oifname "{cfg.vpn_interface}" counter accept comment "nft-killswitch-output"')
+
     a("")
     a('        oifname "lo" accept')
     a(f"        {OPH} udp sport 68 udp dport 67 accept                # DHCP client only (sport 68)")

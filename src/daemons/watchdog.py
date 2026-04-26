@@ -517,11 +517,18 @@ class NftWatchdog:
             return False, "markers not loaded; cannot verify killswitch integrity"
 
         # 1. Check OUTPUT chain for our marker
+        # We use regex to handle dynamic 'packets X bytes Y' counter values
         output_marker = str(self._markers.get("output_rule", "")).strip()
         if output_marker:
+            # Marker usually looks like: comment "nft-killswitch-output"
+            # Actual rule may be: oifname "wg0" counter packets 0 bytes 0 accept comment "nft-killswitch-output"
             ok, out, _ = self._run(["nft", "list", "chain", "ip", "firewall", "output"])
-            if not ok or output_marker not in out:
-                return False, f"missing: OUTPUT rule marker in 'ip firewall output'"
+            # Extract the actual comment string from the marker (e.g. nft-killswitch-output)
+            comment_match = re.search(r'comment\s+"([^"]+)"', output_marker)
+            comment_str = comment_match.group(1) if comment_match else "nft-killswitch-output"
+            
+            if not ok or comment_str not in out:
+                return False, f"missing: OUTPUT rule marker ({comment_str}) in 'ip firewall output'"
 
         # 2. Check for IPv6 killswitch table
         ip6_table = str(self._markers.get("ip6_table", "")).strip()
@@ -541,10 +548,15 @@ class NftWatchdog:
             if pattern not in content:
                 return False
         if self._markers:
-            output_rule = str(self._markers.get("output_rule", "")).strip()
-            ip6_table = str(self._markers.get("ip6_table", "")).strip()
-            if output_rule and output_rule not in content:
+            output_marker = str(self._markers.get("output_rule", "")).strip()
+            # Extract actual comment string for flexible matching
+            comment_match = re.search(r'comment\s+"([^"]+)"', output_marker)
+            comment_str = comment_match.group(1) if comment_match else "nft-killswitch-output"
+            
+            if comment_str not in content:
                 return False
+
+            ip6_table = str(self._markers.get("ip6_table", "")).strip()
             if ip6_table and f"table ip6 {ip6_table}" not in content:
                 return False
         return True
