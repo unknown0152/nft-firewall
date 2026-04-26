@@ -68,14 +68,18 @@ def _docker_running() -> str:
             capture_output=True, text=True, timeout=8,
         )
         if r.returncode != 0:
-            return "🔴 docker error"
+            err = r.stderr.strip().splitlines()[0] if r.stderr else f"exit {r.returncode}"
+            # Shorten common permission error
+            if "permission denied" in err.lower():
+                return "🔴 permission denied"
+            return f"🔴 {err[:20]}"
         names = [l for l in r.stdout.splitlines() if l.strip()]
         n = len(names)
         return f"🟢 {n} running" if n else "🔴 none running"
     except FileNotFoundError:
         return "— not installed"
-    except Exception:
-        return "🔴 error"
+    except Exception as e:
+        return f"🔴 {str(e)[:20]}"
 
 
 def _exposed_ports() -> str:

@@ -705,6 +705,40 @@ def _nft_check_permission_error(message: str) -> bool:
     return any(needle in lowered for needle in needles)
 
 
+def _cmd_debug(_args: argparse.Namespace) -> None:
+    """debug — exhaustive technical dump for AI diagnostics."""
+    print("=== NFT Firewall Technical Debug Dump ===")
+    print(f"Time: {datetime.now().isoformat()}")
+    print(f"Python: {sys.version}")
+    
+    print("\n-- OS Release --")
+    os.system("cat /etc/os-release | grep PRETTY")
+    
+    print("\n-- Interfaces --")
+    os.system("ip -br addr")
+    
+    print("\n-- WireGuard Status --")
+    os.system("sudo wg show 2>&1")
+    
+    print("\n-- Systemd Units --")
+    for svc in ["nft-watchdog", "nft-listener", "nft-ssh-alert", "wg-quick@wg0"]:
+        os.system(f"systemctl status {svc} --no-pager -n 0 2>&1 | grep -E 'Active:|Loaded:'")
+
+    print("\n-- Docker Info --")
+    os.system("docker version --format 'Client: {{.Client.Version}} Server: {{.Server.Version}}' 2>&1")
+    os.system("docker ps -a --format '{{.Names}} [{{.Status}}]' 2>&1")
+    
+    print("\n-- Groups --")
+    os.system("groups")
+    
+    print("\n-- Recent Watchdog Logs --")
+    os.system("journalctl -u nft-watchdog -n 10 --no-pager 2>&1")
+
+    print("\n-- Recent NFT Denies --")
+    os.system("dmesg | grep 'nft-in-drop' | tail -n 5")
+    print("==========================================")
+
+
 def _cmd_health(_args: argparse.Namespace) -> None:
     from daemons.watchdog import NftWatchdog
     cfg_path = _config_path_for_daemon()
@@ -1158,6 +1192,7 @@ Quick-start workflow:
     sub.add_parser("profiles",         help="List available firewall profiles")
     sub.add_parser("rules",            help="Print the live nftables ruleset")
     sub.add_parser("health",           help="JSON health report (exit 0=healthy, 1=degraded)")
+    sub.add_parser("debug",            help="Technical debug dump for AI diagnostics")
     sub.add_parser("keybase-test",     help="Send a test Keybase notification")
     sub.add_parser("maintenance",      help="Prune state backups >30 days old and rotated log files")
     sub.add_parser("threat-update", help="Sync threat feed IPs into blocked_ips set (daily via timer)")
@@ -1202,6 +1237,7 @@ _HANDLERS = {
     "profiles"        : _cmd_profiles,
     "rules"           : _cmd_rules,
     "health"          : _cmd_health,
+    "debug"           : _cmd_debug,
     "keybase-test"    : _cmd_keybase_test,
     "maintenance"     : _cmd_maintenance,
     "threat-update"   : _cmd_threat_update,
