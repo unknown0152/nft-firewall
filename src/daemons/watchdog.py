@@ -520,9 +520,8 @@ class NftWatchdog:
         main_table = str(self._markers.get("main_table", "firewall")).strip()
         ok, out, _ = self._run(["nft", "list", "chain", "ip", main_table, "output"])
         
-        # SEARCH LOGIC: 
-        # Nftables often breaks rules into multiple lines or adds counters.
         # The ONLY thing we strictly require is the comment "nft-killswitch-output".
+        # This is a fixed string that nftables does not reformat.
         if not ok or 'comment "nft-killswitch-output"' not in out:
             return False, f"missing: OUTPUT rule marker in 'ip {main_table} output'"
 
