@@ -127,6 +127,9 @@ public_ports = 80,443
 """)
     monkeypatch.setattr(state, "merge_live_sets_into_persistent", lambda: {})
     monkeypatch.setattr(docker, "detect_bridge_networks", lambda _supernet: ["172.18.0.0/16"])
+    # Mock interface existence validation for tests
+    import core.rules
+    monkeypatch.setattr(core.rules, "validate_interface_exists", lambda _iface: None)
 
     ruleset_cfg = main._build_ruleset_config(cfg, "cosmos-vpn-secure")
     ruleset = generate_ruleset(ruleset_cfg)
@@ -155,6 +158,9 @@ public_ports = 80,443
 """)
     monkeypatch.setattr(state, "merge_live_sets_into_persistent", lambda: {})
     monkeypatch.setattr(docker, "detect_bridge_networks", lambda _supernet: [])
+    # Mock interface existence validation for tests
+    import core.rules
+    monkeypatch.setattr(core.rules, "validate_interface_exists", lambda _iface: None)
 
     ruleset_cfg = main._build_ruleset_config(cfg, "cosmos-vpn-secure")
     ruleset = generate_ruleset(ruleset_cfg, exposed_ports=[])
