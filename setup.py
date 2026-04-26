@@ -604,6 +604,24 @@ def step2_install_code() -> None:
         FW_BIN.chmod(0o755)
         _ok(f"Installed fw wrapper -> {FW_BIN}")
 
+    # tests/ → /opt/nft-firewall/tests/
+    tests_dir = project_root / "tests"
+    if tests_dir.is_dir():
+        dst_tests = INSTALL_DIR / "tests"
+        if dst_tests.exists():
+            shutil.rmtree(dst_tests)
+        shutil.copytree(tests_dir, dst_tests)
+        _ok(f"Installed tests/ → {dst_tests}")
+
+    # scripts/ → /opt/nft-firewall/scripts/
+    scripts_dir = project_root / "scripts"
+    if scripts_dir.is_dir():
+        dst_scripts = INSTALL_DIR / "scripts"
+        if dst_scripts.exists():
+            shutil.rmtree(dst_scripts)
+        shutil.copytree(scripts_dir, dst_scripts)
+        _ok(f"Installed scripts/ → {dst_scripts}")
+
 
 def step2_5_nft_preflight(src_path: Optional[Path] = None) -> None:
     """Validate the generated ruleset with nft --check before touching systemd.
