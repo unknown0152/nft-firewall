@@ -517,14 +517,14 @@ class NftWatchdog:
             return False, "markers not loaded; cannot verify killswitch integrity"
 
         # 1. Check OUTPUT chain for our marker
-        output_marker = str(self._markers.get("output_rule", "")).strip()
         main_table = str(self._markers.get("main_table", "firewall")).strip()
-        if output_marker:
-            ok, out, _ = self._run(["nft", "list", "chain", "ip", main_table, "output"])
-            # The 'unique fingerprint' is the comment string.
-            # We look for it anywhere in the output of the chain.
-            if not ok or "nft-killswitch-output" not in out:
-                return False, f"missing: OUTPUT rule marker in 'ip {main_table} output'"
+        ok, out, _ = self._run(["nft", "list", "chain", "ip", main_table, "output"])
+        
+        # The 'unique fingerprint' is the comment string.
+        # We look for it anywhere in the output of the chain.
+        # Use regex to be 100% sure we match 'comment "nft-killswitch-output"'
+        if not ok or not re.search(r'comment\s+"nft-killswitch-output"', out):
+            return False, f"missing: OUTPUT rule marker in 'ip {main_table} output'"
 
         # 2. Check for IPv6 killswitch table
         ip6_table = str(self._markers.get("ip6_table", "")).strip()
