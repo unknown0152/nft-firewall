@@ -1042,6 +1042,15 @@ def step7_activate_vpn() -> None:
                 try:
                     ip = socket.gethostbyname(host)
                     _ok(f"Resolved to {ip}")
+                    
+                    # Update firewall.ini with the IP so ruleset generation is reliable
+                    cp = configparser.ConfigParser()
+                    cp.read(str(_CONF_FILE))
+                    if cp.has_section("network"):
+                        cp.set("network", "vpn_server_ip", ip)
+                        with _CONF_FILE.open("w") as f:
+                            cp.write(f)
+                        _ok("Updated firewall.ini with resolved IP")
                 except Exception as e:
                     _warn(f"Could not resolve {host}: {e}. VPN may fail to start.")
     except Exception:

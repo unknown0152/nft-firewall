@@ -17,8 +17,10 @@ if cosmos_installed; then
 else
   echo "[+] Downloading Cosmos installer..."
   COSMOS_INSTALLER="$(mktemp /tmp/cosmos-get.XXXXXX.sh)"
+  echo "[debug] Temp installer path: $COSMOS_INSTALLER"
   # Check for curl again just in case
   if ! command -v curl >/dev/null 2>&1; then
+      echo "[debug] curl missing, installing..."
       apt-get update -qq && apt-get install -y curl >/dev/null
   fi
   curl -sfL https://cosmos-cloud.io/get.sh -o "$COSMOS_INSTALLER"
@@ -28,8 +30,10 @@ else
   # We prepend the override to the script so it is defined before any calls
   sed -i '1a check_ports() { echo "[+] Skipping Cosmos iptables; nft-firewall active."; }' "$COSMOS_INSTALLER"
   
+  echo "[+] Running Cosmos installer (NO_DOCKER=1)..."
   export NO_DOCKER=1
   bash "$COSMOS_INSTALLER"
+  echo "[ok] Cosmos installer finished"
 fi
 
 # 1. Fix start.sh pathing
@@ -76,17 +80,18 @@ echo "[+] Ensuring Docker firewall authority is disabled..."
 mkdir -p /etc/docker
 if [[ ! -f /etc/docker/daemon.json ]]; then
   echo '{"iptables": false, "ip6tables": false}' > /etc/docker/daemon.json
-  systemctl restart docker || true
+  echo "[debug] Created /etc/docker/daemon.json with iptables disabled"
+  systemctl restart docker || echo "[!] Docker restart failed (non-fatal)"
 fi
 
 # 6. NFTables activation
 echo "[+] Activating nftables..."
-systemctl enable --now nftables || true
+systemctl enable --now nftables || echo "[!] nftables activation warning"
 systemctl daemon-reload
 
 if [[ -f /etc/systemd/system/CosmosCloud.service ]]; then
   echo "[+] Restarting CosmosCloud with new security profile..."
-  systemctl restart CosmosCloud || true
+  systemctl restart CosmosCloud || echo "[!] CosmosCloud restart failed"
 fi
 
 # 7. Keybase Optional setup
@@ -104,6 +109,8 @@ if ! command -v keybase >/dev/null 2>&1; then
         echo "[!] Keybase installed. IMPORTANT: Run 'keybase login' after this script."
       fi
   fi
+else
+  echo "[ok] Keybase already present"
 fi
 
 # 8. Verification & Auto-Apply
@@ -114,8 +121,12 @@ if [[ -f "/opt/nft-firewall/src/main.py" ]]; then
   echo "[+] Activating firewall rules for profile: $PROF..."
   
   # Run main.py directly to bypass wrapper restriction (bypass safe-mode for initial setup)
-  sudo PYTHONPATH=/opt/nft-firewall/src /usr/bin/python3 /opt/nft-firewall/src/main.py apply "$PROF" || true
+  if sudo PYTHONPATH=/opt/nft-firewall/src /usr/bin/python3 /opt/nft-firewall/src/main.py apply "$PROF"; then
+      echo "[ok] Firewall rules applied successfully"
+  else
+      echo "[!] Firewall rules application failed"
+  fi
   
   # Check status via wrapper
-  fw doctor "$PROF" || true
+  fw doctor "$PROF" || echo "[!] Doctor check returned issues"
 fi
