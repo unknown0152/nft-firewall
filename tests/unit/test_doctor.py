@@ -169,3 +169,49 @@ def test_doctor_detects_public_web_on_physical(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert exc.value.code == 1
     assert "[fail] physical public 80/443" in out
+
+
+def test_doctor_detects_malicious_live_rules(monkeypatch, capsys):
+    """Verify that doctor detects broad/unconditional accept rules in LIVE nftables."""
+    main, state = _patch_doctor_common(monkeypatch)
+
+    monkeypatch.setattr(main.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state, "simulate_apply", lambda _ruleset: (True, ""))
+
+    import subprocess
+
+    def mock_run(cmd, **kwargs):
+        class MockResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        
+        res = MockResult()
+        # Mocking 'nft list ruleset' specifically
+        if cmd == ["nft", "list", "ruleset"]:
+            res.stdout = (
+                'table ip firewall {\n'
+                '    chain output {\n'
+                '        accept\n'  # Standalone accept — FAILURE 1
+                '    }\n'
+                '    chain forward {\n'
+                '        ip saddr @docker_nets oifname "eth0" accept\n' # Docker escape — FAILURE 2
+                '    }\n'
+                '    chain input {\n'
+                '        iifname "eth0" tcp dport 80 accept\n' # Public exposure — FAILURE 3
+                '    }\n'
+                '}\n'
+            )
+        return res
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    with pytest.raises(SystemExit) as exc:
+        main._cmd_doctor(types.SimpleNamespace(profile="cosmos-vpn-secure"))
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "[fail] live rules invariants" in out
+    assert "output chain contains a potentially broad 'accept' rule: accept" in out
+    assert "forwarding allows @docker_nets to escape via eth0" in out
+    assert "public port exposure on eth0" in out

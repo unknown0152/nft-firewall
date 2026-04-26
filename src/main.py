@@ -285,6 +285,57 @@ def _physical_public_web_lines(ruleset: str, phy_if: str, lan_net: str = "") -> 
     return matches
 
 
+def _check_live_rules_invariants(ruleset: str, phy_if: str, vpn_if: str) -> list[str]:
+    """Analyze a ruleset string for broad/unconditional accept rules.
+
+    Returns a list of violation strings, or [] if clean.
+    """
+    import re
+    violations = []
+    
+    # Pre-process for robust analysis
+    clean = re.sub(r'#.*$', '', ruleset, flags=re.MULTILINE)
+    condensed = re.sub(r'\s+', ' ', clean)
+
+    # 1. chain output contains standalone 'accept'
+    # We look for a chain block named 'output' that contains a bare 'accept'
+    # Pattern: chain output { [not an oifname wg0/lo or meta mark] accept }
+    for chain_match in re.finditer(r'chain\s+output\s+{(.*?)}', condensed, re.IGNORECASE):
+        body = chain_match.group(1).strip()
+        # Split by rule separators
+        for rule in re.split(r'[;\n]', body):
+            rule = rule.strip()
+            if not rule: continue
+            if "accept" in rule:
+                # Rule is literally just 'accept'
+                if rule == "accept":
+                    violations.append("output chain contains a potentially broad 'accept' rule: accept")
+                    continue
+                # Or rule contains accept but lacks safety tokens
+                is_safe = (
+                    'oifname "' + vpn_if + '"' in rule or
+                    'oifname "lo"' in rule or
+                    'iifname "lo"' in rule or
+                    'meta mark 0x' in rule
+                )
+                if not is_safe:
+                    violations.append(f"output chain contains a potentially broad 'accept' rule: {rule}")
+
+    # 3. forward accept that allows docker_nets to physical interface
+    # Look for: ip saddr @docker_nets oifname "PHY" accept
+    forward_pattern = rf'ip\s+saddr\s+@docker_nets\s+oifname\s+"{re.escape(phy_if)}".*?accept'
+    if re.search(forward_pattern, condensed, re.IGNORECASE):
+        violations.append(f"forwarding allows @docker_nets to escape via {phy_if}")
+
+    # 4. input accept on physical interface for public ports 80/443
+    # Use the existing helper logic but on the live ruleset
+    public_phy = _physical_public_web_lines(ruleset, phy_if)
+    if public_phy:
+        violations.append(f"public port exposure on {phy_if}: {public_phy[0]}")
+
+    return violations
+
+
 def _never_block_from_config(cfg: configparser.ConfigParser) -> List[str]:
     """Return configured never-block CIDRs, always including the LAN subnet."""
     from utils.validation import parse_never_block
@@ -746,6 +797,19 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         checks.append(("ipv6 blackout",
                        "ok" if "table ip6 killswitch" in ruleset and "priority -300" in ruleset else "fail",
                        "ip6 killswitch priority -300 present"))
+
+        # LIVE RULES CHECK (The new requirement)
+        try:
+            live_result = subprocess.run(["nft", "list", "ruleset"], capture_output=True, text=True, check=True)
+            live_rules = live_result.stdout
+            live_violations = _check_live_rules_invariants(live_rules, ruleset_cfg.phy_if, ruleset_cfg.vpn_interface)
+            checks.append((
+                "live rules invariants",
+                "ok" if not live_violations else "fail",
+                "intact" if not live_violations else "; ".join(live_violations)
+            ))
+        except (subprocess.SubprocessError, OSError) as exc:
+            checks.append(("live rules invariants", "warn", f"could not fetch live ruleset: {exc}"))
 
     persisted = state.load_persistent_sets()
     total = sum(len(v) for v in persisted.values())
