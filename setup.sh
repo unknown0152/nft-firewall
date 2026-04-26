@@ -9,11 +9,10 @@ set -euo pipefail
 
 echo "[+] NFT Firewall Bootstrapper"
 
-# 1. Install git if missing
-if ! command -v git >/dev/null 2>&1; then
-  echo "[+] Installing git..."
-  apt-get update -qq && apt-get install -y git >/dev/null
-fi
+# 1. Install mandatory system packages if missing
+echo "[+] Updating package cache and installing mandatory tools..."
+apt-get update -qq
+apt-get install -y git curl fuse3 unzip >/dev/null
 
 # 2. Create temp workspace
 INSTALL_TMP=$(mktemp -d /tmp/nft-firewall-install.XXXXXX)

@@ -969,6 +969,10 @@ def step6_reload_and_restart() -> None:
         _die(f"daemon-reload failed: {r.stderr.strip()}")
     _ok("systemctl daemon-reload")
 
+    # Short delay to allow systemd to settle (essential for fresh user/unit recognition)
+    import time
+    time.sleep(2)
+
     for svc in ACTIVE_SERVICES:
         unit = f"{svc}.service"
         _run(["systemctl", "enable", unit], check=False)

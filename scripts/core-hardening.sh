@@ -17,12 +17,16 @@ if cosmos_installed; then
 else
   echo "[+] Downloading Cosmos installer..."
   COSMOS_INSTALLER="$(mktemp /tmp/cosmos-get.XXXXXX.sh)"
+  # Check for curl again just in case
+  if ! command -v curl >/dev/null 2>&1; then
+      apt-get update -qq && apt-get install -y curl >/dev/null
+  fi
   curl -sfL https://cosmos-cloud.io/get.sh -o "$COSMOS_INSTALLER"
   chmod +x "$COSMOS_INSTALLER"
 
   echo "[+] Patching Cosmos installer to skip iptables..."
-  sed -i 's/check_ports() {/check_ports_orig() {/g' "$COSMOS_INSTALLER"
-  echo 'check_ports() { echo "[+] Skipping Cosmos iptables; nft-firewall active."; }' >> "$COSMOS_INSTALLER"
+  # We prepend the override to the script so it is defined before any calls
+  sed -i '1a check_ports() { echo "[+] Skipping Cosmos iptables; nft-firewall active."; }' "$COSMOS_INSTALLER"
   
   export NO_DOCKER=1
   bash "$COSMOS_INSTALLER"
