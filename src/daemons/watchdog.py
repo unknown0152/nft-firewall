@@ -997,8 +997,9 @@ class NftWatchdog:
                         ["nft", "--check", "--file", conf_path], timeout=15,
                     )
                     try:
-                        conf_content = open(conf_path).read()
-                    except OSError:
+                        conf_content = Path(conf_path).read_text()
+                    except OSError as exc:
+                        self._log("WARN", f"Could not read {conf_path}: {exc}")
                         conf_content = ""
                     conf_valid = check_ok and self._validate_conf_markers(conf_content)
                     if not conf_valid:

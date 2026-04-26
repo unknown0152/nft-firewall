@@ -167,7 +167,11 @@ def save_conf(ruleset: str, path: Path = NFT_CONF) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(ruleset)
-    path.chmod(0o600)
+    # 0o644 so the watchdog (running as fw-admin) can read this file directly
+    # for marker validation before triggering an `nft -f` auto-repair. The conf
+    # mirrors the live ruleset (visible via `sudo nft list ruleset`) and contains
+    # no secrets, so world-read is acceptable.
+    path.chmod(0o644)
     print(f"[state] Ruleset saved to {path}")
 
 
