@@ -541,34 +541,17 @@ class NftWatchdog:
 
     def _validate_conf_markers(self, content: str) -> bool:
         """Return True only if *content* contains structural killswitch markers."""
-        if not content.strip():
+        if not content or not content.strip():
             return False
         
         lowered = content.lower()
         
-        # Core safety requirements — must have at least one of these to be considered valid.
-        # We use extremely broad matching here because the file is already 
-        # root-protected; we just need to know it's *our* file.
-        
-        # 1. Any mention of our unique table or comment
-        markers = [
-            "table ip firewall", 
-            "nft-killswitch-output", 
-            "vpn killswitch"
-        ]
-        found = [m for m in markers if m in lowered]
-        self._log("DEBUG", f"Conf validation markers found: {found} in content dump:\n{content[:500]}...")
-        
-        if not found:
-            self._log("WARN", f"Conf validation FAILED: none of {markers} found")
-            return False
+        # Core safety requirements — proved to be 'our' firewall.
+        if "policy drop" in lowered and "nft-killswitch-output" in lowered:
+            return True
             
-        # 2. Safety: Must have a policy drop somewhere to be considered a firewall
-        if "policy drop" not in lowered:
-            self._log("WARN", "Conf validation FAILED: 'policy drop' missing")
-            return False
-
-        return True
+        self._log("WARN", f"Conf validation FAILED. content length: {len(content)}")
+        return False
 
     # ── Endpoint IP cache ─────────────────────────────────────────────────────
 

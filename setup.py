@@ -847,6 +847,7 @@ case "${1:-}" in
     ;;
   --check) [ "${2:-}" = "--file" ] && exec /usr/sbin/nft "$@" ;;
   --file|-f) [ "${2:-}" = "/etc/nftables.conf" ] && exec /usr/sbin/nft "$@" ;;
+
   --echo) [ "${2:-}" = "--json" ] && [ "${3:-}" = "add" ] && [ "${4:-}" = "rule" ] && [ "${5:-}" = "ip" ] && [ "${6:-}" = "firewall" ] && [ "${7:-}" = "input" ] && exec /usr/sbin/nft "$@" ;;
 esac
 echo "fw-nft: denied arguments: $*" >&2
