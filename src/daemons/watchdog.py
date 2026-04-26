@@ -1138,11 +1138,14 @@ class NftWatchdog:
                         now   = datetime.now()
                         today = now.date()
                         if now.hour == daily_hour and last_daily_date != today:
+                            ks_ok, ks_msg = self._check_nftables_integrity(iface)
+                            ks_status = "🟢 Active" if ks_ok else f"🔴 DEGRADED ({ks_msg})"
                             self._notify_async(
                                 title="📊 Daily Health Summary",
                                 body=(
                                     f"━━━━━━━━━━━━━━━━━━━━\n"
                                     f"    🖥️  Host: {host}\n"
+                                    f"    🛡️  Killswitch: {ks_status}\n"
                                     f"    🟢  All systems nominal\n"
                                     f"    📡  {reason}"
                                 ),
