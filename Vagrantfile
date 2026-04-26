@@ -4,15 +4,14 @@
 Vagrant.configure("2") do |config|
   config.vm.box = "debian/bookworm64"
 
-  # VM Resources
-  config.vm.provider "virtualbox" do |vb|
-    vb.memory = "1024"
-    vb.cpus = 1
+  # VM Resources - using libvirt for native Linux speed
+  config.vm.provider "libvirt" do |lv|
+    lv.memory = 1024
+    lv.cpus = 1
   end
 
   # Sync the current directory to the VM
-  # We sync to /home/vagrant/nft-firewall
-  config.vm.synced_folder ".", "/home/vagrant/nft-firewall"
+  config.vm.synced_folder ".", "/home/vagrant/nft-firewall", type: "rsync"
 
   # Provisioning
   config.vm.provision "shell", inline: <<-SHELL
@@ -21,14 +20,14 @@ Vagrant.configure("2") do |config|
 
     echo "[+] Installing dependencies..."
     apt-get update -qq
-    apt-get install -y -qq git python3 python3-pip nftables wireguard-tools curl
+    apt-get install -y -qq git python3 python3-pip nftables wireguard-tools curl openresolv unzip
 
     # Navigate to project
     cd /home/vagrant/nft-firewall
 
-    # Create a default firewall.ini if it doesn't exist to avoid interactive prompts
+    # Create a default firewall.ini if it doesn't exist
     if [ ! -f config/firewall.ini ]; then
-      echo "[+] Pre-configuring firewall.ini for Vagrant environment..."
+      echo "[+] Pre-configuring firewall.ini for Vagrant..."
       mkdir -p config
       cat > config/firewall.ini <<EOF
 [network]
@@ -47,8 +46,6 @@ EOF
     fi
 
     echo "[+] Running NFT Firewall installation..."
-    # Run setup.py. We use sudo as required.
-    # Since we provided firewall.ini, it should skip Step 0 interactive wizard.
     sudo python3 setup.py install
 
     echo ""
