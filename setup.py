@@ -1043,7 +1043,7 @@ def step7_activate_vpn() -> None:
                     ip = socket.gethostbyname(host)
                     _ok(f"Resolved to {ip}")
                     
-                    # Update firewall.ini with the IP so ruleset generation is reliable
+                    # 1. Update firewall.ini
                     cp = configparser.ConfigParser()
                     cp.read(str(_CONF_FILE))
                     if cp.has_section("network"):
@@ -1051,6 +1051,24 @@ def step7_activate_vpn() -> None:
                         with _CONF_FILE.open("w") as f:
                             cp.write(f)
                         _ok("Updated firewall.ini with resolved IP")
+                    
+                    # 2. Update wg0.conf (The Critical Fix)
+                    # Replacing hostname with IP in the actual WireGuard config prevents DNS-lookup hangs.
+                    if wg_conf.exists():
+                        try:
+                            conf_data = wg_conf.read_text()
+                            # Replace host only, keep port
+                            new_conf = re.sub(
+                                r"(?i)(Endpoint\s*=\s*)" + re.escape(host),
+                                rf"\g<1>{ip}",
+                                conf_data
+                            )
+                            if new_conf != conf_data:
+                                wg_conf.write_text(new_conf)
+                                _ok(f"Patched {wg_conf} with raw IP for DNS-free startup")
+                        except Exception as patch_err:
+                            _warn(f"Failed to patch {wg_conf}: {patch_err}")
+
                 except Exception as e:
                     _warn(f"Could not resolve {host}: {e}. VPN may fail to start.")
     except Exception:

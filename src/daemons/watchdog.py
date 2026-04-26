@@ -544,18 +544,21 @@ class NftWatchdog:
         if not content.strip():
             return False
         
+        # We use a case-insensitive search and handle multi-line formatting by looking 
+        # for the essential components anywhere in the text.
         lowered = content.lower()
         
-        # Core safety requirements — must have at least one of these to be considered valid
-        # We use a logical OR here for resilience, but require the specific comment
-        core_patterns = ["table ip6 killswitch", "policy drop", "nft-killswitch-output"]
-        found_patterns = [p for p in core_patterns if p in lowered]
-        
-        # If we have at least 1 of the core patterns (like policy drop), 
-        # we check for the critical comment marker more carefully
-        if not found_patterns:
+        # 1. Mandatory Table Check
+        if "table ip6 killswitch" not in lowered:
+            return False
+            
+        # 2. Mandatory Policy Check
+        if "policy drop" not in lowered:
             return False
 
+        # 3. Mandatory Output Marker Check
+        # We look for the comment string specifically. 
+        # This is the 'unique fingerprint' of our firewall.
         if self._markers:
             output_marker = str(self._markers.get("output_rule", "")).strip()
             comment_match = re.search(r'comment\s+"([^"]+)"', output_marker)
@@ -563,6 +566,10 @@ class NftWatchdog:
             
             if comment_str not in lowered:
                 return False
+        else:
+            if "nft-killswitch-output" not in lowered:
+                return False
+                
         return True
 
     # ── Endpoint IP cache ─────────────────────────────────────────────────────
