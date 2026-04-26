@@ -521,8 +521,9 @@ class NftWatchdog:
         main_table = str(self._markers.get("main_table", "firewall")).strip()
         if output_marker:
             ok, out, _ = self._run(["nft", "list", "chain", "ip", main_table, "output"])
-            # Flexible comment search: handles multi-line, packets/bytes, and interface names
-            if not ok or not re.search(r'comment\s+"nft-killswitch-output"', out):
+            # The 'unique fingerprint' is the comment string.
+            # We look for it anywhere in the output of the chain.
+            if not ok or "nft-killswitch-output" not in out:
                 return False, f"missing: OUTPUT rule marker in 'ip {main_table} output'"
 
         # 2. Check for IPv6 killswitch table
