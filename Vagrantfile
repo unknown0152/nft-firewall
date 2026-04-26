@@ -8,10 +8,14 @@ Vagrant.configure("2") do |config|
   config.vm.provider "libvirt" do |lv|
     lv.memory = 1024
     lv.cpus = 1
+    lv.cpu_mode = "host-passthrough"
   end
 
   # Sync the current directory to the VM
   config.vm.synced_folder ".", "/home/vagrant/nft-firewall", type: "rsync"
+
+  # Use bridged networking for reliable IP assignment on this host
+  config.vm.network "public_network", dev: "enp88s0", mode: "bridge", type: "bridge"
 
   # Provisioning
   config.vm.provision "shell", inline: <<-SHELL
