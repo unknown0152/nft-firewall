@@ -688,7 +688,8 @@ def step3_scaffold_dirs() -> None:
 
     for d in FIREWALL_DIRS:
         d.mkdir(parents=True, exist_ok=True)
-        _ok(f"Ensured {d}")
+        d.chmod(0o755)
+        _ok(f"Ensured {d} (755)")
 
     for d in FIREWALL_DIRS:
         _run(["chown", "-R", f"{SYSTEM_USER}:{SYSTEM_USER}", str(d)])
