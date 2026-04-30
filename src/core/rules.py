@@ -567,11 +567,6 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a("    chain output {")
     a("        type filter hook output priority filter; policy drop;")
     a("")
-    # Atomic marker for watchdog/doctor integrity checks
-    # This rule is the SOLE path for internet traffic — it MUST be bound to the VPN interface.
-    a(f'        oifname "{cfg.vpn_interface}" counter accept comment "nft-killswitch-output"')
-
-    a("")
     a('        oifname "lo" accept')
     a(f"        {OPH} udp sport 68 udp dport 67 accept                # DHCP client only (sport 68)")
     a("        ct state invalid drop")
@@ -583,7 +578,11 @@ def _build_filter_table(cfg: RulesetConfig, exposed_ports: List[Dict]) -> List[s
     a(f"        {OPH} ip daddr {cfg.lan_net} accept                         # LAN stays local")
     a('        meta oifkind "bridge" ip daddr @docker_nets accept'
       "               # host → containers via bridge only")
-    a(f"        {OVPN} accept                                        # KILLSWITCH")
+    # The KILLSWITCH accept is the SOLE path for internet egress, placed last
+    # so blocked_ips/ct-invalid drops above it actually fire on VPN traffic.
+    # The "nft-killswitch-output" comment is the integrity marker that the
+    # watchdog and doctor look for; it MUST stay on this rule.
+    a(f'        {OVPN} counter accept comment "nft-killswitch-output"   # KILLSWITCH')
     a("")
     a('        counter log prefix "[nft-out-drop] " flags all limit rate 5/minute')
     a("    }")

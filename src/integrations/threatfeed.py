@@ -220,20 +220,22 @@ def sync(
     to_add    = new_ips - old_ips
     to_remove = old_ips - new_ips
 
-    added = 0
+    # Track only IPs we actually changed in nft. If we persist before
+    # confirming, a failed block_ip silently shows up as "blocked" on the
+    # next sync, the diff skips it, and the firewall drifts from the feed.
+    added_ips: "set[str]" = set()
     for ip in to_add:
-        if _apply_block_guard(ip):
-            if block_ip(ip):
-                added += 1
+        if _apply_block_guard(ip) and block_ip(ip):
+            added_ips.add(ip)
 
-    removed = 0
+    removed_ips: "set[str]" = set()
     for ip in to_remove:
         if unblock_ip(ip):
-            removed += 1
+            removed_ips.add(ip)
 
-    _save_state((old_ips | to_add) - to_remove)
-    print(f"[threatfeed] sync: +{added} added, -{removed} removed")
-    return (added, removed)
+    _save_state((old_ips | added_ips) - removed_ips)
+    print(f"[threatfeed] sync: +{len(added_ips)} added, -{len(removed_ips)} removed")
+    return (len(added_ips), len(removed_ips))
 
 
 def get_entry_count() -> int:

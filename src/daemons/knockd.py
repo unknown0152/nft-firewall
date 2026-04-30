@@ -56,16 +56,34 @@ class PortKnockDaemon:
 
     def _add_rule(self, ip: str) -> str:
         self._validate_vpn_iface()
-        # Bind specifically to the VPN interface
+        # Validate the source IP BEFORE subprocess.run. The packet parser is
+        # expected to be correct, but a malformed ip like "1.2.3.4 accept"
+        # would silently widen the rule body — fail closed instead.
+        from utils.validation import validate_ipv4_network
+        result = validate_ipv4_network(ip, allow_network=False)
+        if not result.ok:
+            raise ValueError(f"knockd: refusing to insert untrusted source IP {ip!r}: {result.reason}")
+        ip = result.value
+
+        # The fw-nft wrapper's `--echo` allowlist accepts exactly:
+        #   --echo --json add rule ip firewall input <BODY>
+        # where <BODY> is a SINGLE argv token. Build the rule body as one
+        # string so the wrapper's `[ "$#" -eq 8 ]` check passes; nft itself
+        # parses the body internally.
+        body = (
+            f'iifname "{self._vpn_iface}" '
+            f'ip saddr {ip} '
+            f'tcp dport {self._ssh_port} accept'
+        )
         cmd = [
             "nft", "--echo", "--json", "add", "rule", "ip", "firewall", "input",
-            "iifname", self._vpn_iface, "ip", "saddr", ip, "tcp", "dport", str(self._ssh_port), "accept"
+            body,
         ]
         cmd = self._privileged_nft(cmd)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             raise RuntimeError(f"nft add rule failed: {r.stderr.strip()}")
-        
+
         data = json.loads(r.stdout)
         return str(data["nftables"][0]["rule"]["handle"])
 

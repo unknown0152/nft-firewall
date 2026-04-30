@@ -70,7 +70,10 @@ def test_scaffold_dirs_sets_firewall_and_media_ownership(monkeypatch, tmp_path):
 
     for path in (install_dir, lib_dir, log_dir, etc_dir, cosmos_compose):
         assert path.exists()
-    for path in (install_dir, lib_dir, log_dir, etc_dir):
+    # Code dir is root-owned (group fw-admin) so daemons cannot rewrite their own code.
+    assert ["chown", "-R", "root:fw-admin", str(install_dir)] in calls
+    # Runtime/state dirs stay fw-admin-owned so daemons can write logs and state.
+    for path in (lib_dir, log_dir, etc_dir):
         assert ["chown", "-R", "fw-admin:fw-admin", str(path)] in calls
     assert ["chown", "-R", "media:media", str(media_compose)] in calls
 

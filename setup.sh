@@ -20,9 +20,12 @@ apt-get install -y git curl fuse3 unzip nftables wireguard wireguard-tools wireg
 # Ensure systemd sees new units immediately
 systemctl daemon-reload
 
-# Fix DNS symlink if openresolv/resolvconf transition broke it
-if [ -f /run/resolvconf/resolv.conf ]; then
+# Fix DNS symlink ONLY when /etc/resolv.conf is missing or a dangling symlink.
+# A working file (systemd-resolved stub, custom static resolver, existing
+# openresolv link) must be preserved — clobbering it can break DNS.
+if [ -f /run/resolvconf/resolv.conf ] && ! [ -e /etc/resolv.conf ]; then
     ln -sf /run/resolvconf/resolv.conf /etc/resolv.conf
+    echo "[+] Installed /etc/resolv.conf -> /run/resolvconf/resolv.conf (was missing)"
 fi
 
 # 2. Create temp workspace

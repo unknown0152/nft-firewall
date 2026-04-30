@@ -115,7 +115,7 @@ def validate_block_target(
     return ValidationResult(True, str(net))
 
 
-def get_connection_info() -> Tuple[str, str]:
+def get_connection_info() -> tuple[str, str]:
     """Detect the current connecting IP and its country code using multiple APIs.
     
     Returns (ip, cc) or ("", "") on failure.

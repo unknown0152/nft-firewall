@@ -173,3 +173,97 @@ def test_preflight_skips_if_ini_missing(monkeypatch, tmp_path):
     setup.step2_5_nft_preflight(src_path=Path(__file__).resolve().parent.parent.parent / "src")
 
     assert run_calls == [], "nft should not be called when firewall.ini is missing"
+
+
+def test_install_dir_is_root_owned_not_fw_admin(monkeypatch):
+    """INSTALL_DIR (code) must NOT be chowned to fw-admin.
+
+    A daemon running as fw-admin must not be able to rewrite
+    /opt/nft-firewall/src/main.py — otherwise a compromise of any service
+    account daemon escalates to root via the broad sudoers grant on /usr/local/bin/fw.
+    Runtime/state dirs (LIB_DIR, LOG_DIR, ETC_DIR) may stay fw-admin-owned.
+    """
+    import setup
+
+    chown_calls = []
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: chown_calls.append(tuple(cmd)))
+    monkeypatch.setattr(setup, "_ok",   lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "_info", lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "_warn", lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "_header", lambda *a, **kw: None)
+
+    # Stop mkdir/chmod from touching the host
+    class _Stub:
+        def __init__(self, p): self._p = p
+        def __str__(self): return str(self._p)
+        def mkdir(self, *a, **kw): pass
+        def chmod(self, *a, **kw): pass
+    monkeypatch.setattr(setup, "FIREWALL_DIRS", tuple(_Stub(p) for p in setup.FIREWALL_DIRS))
+    monkeypatch.setattr(setup, "COSMOS_COMPOSE_DIR", _Stub(setup.COSMOS_COMPOSE_DIR))
+
+    setup.step3_scaffold_dirs()
+
+    install_dir = str(setup.INSTALL_DIR)
+    install_chowns = [c for c in chown_calls if c[0] == "chown" and c[-1] == install_dir]
+    assert install_chowns, f"no chown call for INSTALL_DIR; calls={chown_calls}"
+    for call in install_chowns:
+        owner = call[2] if call[1] == "-R" else call[1]
+        assert not owner.startswith(f"{setup.SYSTEM_USER}:"), (
+            f"INSTALL_DIR must not be chowned to fw-admin; got {owner!r} in {call!r}"
+        )
+        assert owner.startswith("root:"), (
+            f"INSTALL_DIR should be root-owned; got {owner!r} in {call!r}"
+        )
+
+
+def test_setup_sh_does_not_clobber_existing_resolv_conf():
+    """setup.sh must NOT unconditionally relink /etc/resolv.conf.
+
+    A working systemd-resolved symlink or custom static resolv.conf must be
+    preserved; only repair the link when /etc/resolv.conf is missing or dangling.
+    """
+    setup_sh = Path(__file__).resolve().parent.parent.parent / "setup.sh"
+    text = setup_sh.read_text()
+    # Must guard the relink with an existence check, not just `[ -f /run/... ]`.
+    assert "! [ -e /etc/resolv.conf ]" in text, (
+        "setup.sh should only touch /etc/resolv.conf when it is missing/dangling"
+    )
+    # And the ln -sf must NOT appear unguarded on a line by itself.
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("ln -sf /run/resolvconf/resolv.conf /etc/resolv.conf"):
+            # Acceptable: this line lives inside the guarded block. Reject only
+            # if there is no guard anywhere above mentioning /etc/resolv.conf.
+            assert "! [ -e /etc/resolv.conf ]" in text
+
+
+def test_state_dirs_remain_fw_admin_owned(monkeypatch):
+    """Runtime state/log dirs must stay fw-admin-owned so daemons can write."""
+    import setup
+
+    chown_calls = []
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: chown_calls.append(tuple(cmd)))
+    monkeypatch.setattr(setup, "_ok",   lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "_info", lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "_warn", lambda *a, **kw: None)
+    monkeypatch.setattr(setup, "_header", lambda *a, **kw: None)
+
+    class _Stub:
+        def __init__(self, p): self._p = p
+        def __str__(self): return str(self._p)
+        def mkdir(self, *a, **kw): pass
+        def chmod(self, *a, **kw): pass
+    monkeypatch.setattr(setup, "FIREWALL_DIRS", tuple(_Stub(p) for p in setup.FIREWALL_DIRS))
+    monkeypatch.setattr(setup, "COSMOS_COMPOSE_DIR", _Stub(setup.COSMOS_COMPOSE_DIR))
+
+    setup.step3_scaffold_dirs()
+
+    fw_admin = setup.SYSTEM_USER
+    for state_dir in (setup.LIB_DIR, setup.LOG_DIR):
+        path_str = str(state_dir)
+        matching = [c for c in chown_calls if c[0] == "chown" and c[-1] == path_str]
+        assert matching, f"no chown call for {state_dir}; calls={chown_calls}"
+        owners = [(c[2] if c[1] == "-R" else c[1]) for c in matching]
+        assert any(o.startswith(f"{fw_admin}:") for o in owners), (
+            f"{state_dir} must remain fw-admin-owned; got {owners!r}"
+        )

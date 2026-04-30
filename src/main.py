@@ -285,6 +285,47 @@ def _physical_public_web_lines(ruleset: str, phy_if: str, lan_net: str = "") -> 
     return matches
 
 
+def _extract_chain_bodies(text: str) -> list[tuple[str, str]]:
+    """Return ``[(chain_name, body), ...]`` from an nft ruleset string.
+
+    Walks the text and uses brace-depth accounting so set literals inside a
+    chain body (``tcp dport { 80, 443 }``) and set-definition blocks
+    (``set blocked_ips { … elements = { … } }``) do not truncate the chain.
+    A naive ``chain ... { (.*?) }`` regex stops at the first ``}`` and misses
+    any rule that follows a nested ``{ … }`` — that is exactly the
+    false-negative this parser fixes.
+    """
+    import re
+
+    results: list[tuple[str, str]] = []
+    pattern = re.compile(r'\bchain\s+(\w+)\s*\{', re.IGNORECASE)
+    pos = 0
+    while True:
+        m = pattern.search(text, pos)
+        if not m:
+            break
+        name = m.group(1)
+        depth = 1
+        i = m.end()  # position just after the opening '{'
+        body_start = i
+        while i < len(text) and depth > 0:
+            ch = text[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth == 0 and i < len(text):
+            results.append((name, text[body_start:i]))
+            pos = i + 1
+        else:
+            # Unbalanced — bail to avoid an infinite loop on malformed input.
+            break
+    return results
+
+
 def _check_live_rules_invariants(ruleset: str, phy_if: str, vpn_if: str, lan_net: str = "") -> list[str]:
     """Analyze a ruleset string for broad/unconditional accept rules.
 
@@ -292,17 +333,21 @@ def _check_live_rules_invariants(ruleset: str, phy_if: str, vpn_if: str, lan_net
     """
     import re
     violations = []
-    
+
     # 1. Clean the ruleset (strip # comments) but PRESERVE newlines
     clean = re.sub(r'#.*$', '', ruleset, flags=re.MULTILINE)
 
-    # 2. Isolate chains
-    for chain_match in re.finditer(r'chain\s+(\w+)\s+{(.*?)}', clean, re.IGNORECASE | re.DOTALL):
-        chain_name = chain_match.group(1).lower()
-        body = chain_match.group(2)
-        
-        # Split into individual rules (handle both semicolons and newlines)
-        rules = [r.strip() for r in re.split(r'[;\n]', body) if r.strip()]
+    # 2. Isolate chains using a brace-depth-aware extractor (regex would
+    #    truncate at the first '}' from any nested set literal).
+    for chain_name_raw, body in _extract_chain_bodies(clean):
+        chain_name = chain_name_raw.lower()
+
+        # Split into individual rules. nft separates rules by newlines (or
+        # semicolons within a single line). A rule may itself contain a
+        # `{ a, b }` set literal — collapse those before splitting so the
+        # set's commas don't get treated as rule separators.
+        body_collapsed = re.sub(r'\{[^{}]*\}', lambda m: m.group(0).replace('\n', ' '), body)
+        rules = [r.strip() for r in re.split(r'[;\n]', body_collapsed) if r.strip()]
         
         for rule in rules:
             if rule.startswith("type ") or rule.startswith("policy "):
@@ -809,23 +854,47 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
                        "ok" if "table ip6 killswitch" in ruleset and "priority -300" in ruleset else "fail",
                        "ip6 killswitch priority -300 present"))
 
-        # LIVE RULES CHECK (The new requirement)
-        try:
-            live_result = subprocess.run(["nft", "list", "ruleset"], capture_output=True, text=True, check=True)
-            live_rules = live_result.stdout
+        # LIVE RULES CHECK
+        # Try raw `nft list ruleset` first (works as root). If that fails — the
+        # systemd doctor unit runs as fw-admin without CAP_NET_ADMIN — fall back
+        # to the privileged wrapper, which is whitelisted for `list ruleset` only.
+        live_rules: Optional[str] = None
+        live_error: Optional[str] = None
+        candidates: list[list[str]] = [["nft", "list", "ruleset"]]
+        if nft_wrapper.exists():
+            candidates.append(["sudo", "-n", str(nft_wrapper), "list", "ruleset"])
+        for cmd in candidates:
+            try:
+                live_result = subprocess.run(
+                    cmd, capture_output=True, text=True, check=False
+                )
+            except (subprocess.SubprocessError, OSError) as exc:
+                live_error = str(exc)
+                continue
+            if live_result.returncode == 0 and live_result.stdout.strip():
+                live_rules = live_result.stdout
+                break
+            live_error = (live_result.stderr or live_result.stdout or "").strip() \
+                or f"rc={live_result.returncode}"
+
+        if live_rules is not None:
             live_violations = _check_live_rules_invariants(
-                live_rules, 
-                ruleset_cfg.phy_if, 
+                live_rules,
+                ruleset_cfg.phy_if,
                 ruleset_cfg.vpn_interface,
-                getattr(ruleset_cfg, "lan_net", "")
+                getattr(ruleset_cfg, "lan_net", ""),
             )
             checks.append((
                 "live rules invariants",
                 "ok" if not live_violations else "fail",
-                "intact" if not live_violations else "; ".join(live_violations)
+                "intact" if not live_violations else "; ".join(live_violations),
             ))
-        except (subprocess.SubprocessError, OSError) as exc:
-            checks.append(("live rules invariants", "warn", f"could not fetch live ruleset: {exc}"))
+        else:
+            checks.append((
+                "live rules invariants",
+                "warn",
+                f"could not fetch live ruleset: {live_error or 'no output'}",
+            ))
 
     persisted = state.load_persistent_sets()
     total = sum(len(v) for v in persisted.values())

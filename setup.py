@@ -683,7 +683,16 @@ def step2_5_nft_preflight(src_path: Optional[Path] = None) -> None:
 # ── Step 3: Directories & ownership ──────────────────────────────────────────
 
 def step3_scaffold_dirs() -> None:
-    """Create runtime directories and apply firewall/media ownership."""
+    """Create runtime directories and apply firewall/media ownership.
+
+    INSTALL_DIR holds code that fw-admin daemons execute via sudo wrappers.
+    It must be root-owned so a compromised daemon cannot rewrite main.py and
+    escalate to root on the next ``sudo /usr/local/bin/fw …`` invocation.
+    Group is fw-admin so service accounts can still read the tree.
+
+    Runtime dirs (LIB_DIR, LOG_DIR, ETC_DIR) stay fw-admin-owned because
+    daemons must write state/logs there.
+    """
     _header("Step 3 — Scaffold Directories & Ownership")
 
     for d in FIREWALL_DIRS:
@@ -691,7 +700,13 @@ def step3_scaffold_dirs() -> None:
         d.chmod(0o755)
         _ok(f"Ensured {d} (755)")
 
-    for d in FIREWALL_DIRS:
+    # Code: root-owned, fw-admin group (read-only for daemons)
+    _run(["chown", "-R", f"root:{SYSTEM_USER}", str(INSTALL_DIR)])
+    _run(["chmod", "-R", "u=rwX,g=rX,o=rX", str(INSTALL_DIR)])
+    _ok(f"chown -R root:{SYSTEM_USER}  {INSTALL_DIR}  (code, read-only for fw-admin)")
+
+    # Runtime/state: fw-admin-owned (daemons must write here)
+    for d in (LIB_DIR, LOG_DIR, ETC_DIR):
         _run(["chown", "-R", f"{SYSTEM_USER}:{SYSTEM_USER}", str(d)])
         _ok(f"chown -R {SYSTEM_USER}:{SYSTEM_USER}  {d}")
 
